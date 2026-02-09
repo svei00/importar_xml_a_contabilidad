@@ -407,9 +407,33 @@ def validar_balance_polizas(polizas_df, tol=0.01):
     return descuadres, pendientes
 
 
+def ordenar_por_fecha(df):
+    """
+    Ordena los documentos por fecha del CFDI (mas antiguo primero) para que
+    el folio de poliza que CONTPAQi asigna al importar (Renumerar el Dato de
+    Entrada) quede correlacionado con la fecha. CONTPAQi numera en el mismo
+    orden en que las polizas llegan en el TXT, asi que el orden de este
+    DataFrame es lo unico que controla ese resultado.
+
+    Desempate: uuid (cuando dos documentos comparten fecha y hora exactas).
+    Fechas vacias o invalidas se mandan al final en vez de tronar el export.
+    """
+    df = df.copy()
+    df["_fecha_orden"] = pd.to_datetime(df["fecha"], errors="coerce")
+    df = df.sort_values(
+        by=["_fecha_orden", "uuid"],
+        ascending=True,
+        na_position="last",
+        kind="mergesort",  # ordenamiento estable: desempates residuales son deterministas
+    )
+    df = df.drop(columns=["_fecha_orden"]).reset_index(drop=True)
+    return df
+
+
 def exportar(df, diot_df, output_dir, filename, log_data):
     filepath = os.path.join(output_dir, filename)
     is_egresos = "EGRESOS" in filename.upper()
+    df = ordenar_por_fecha(df)
     try: df_catalogo = cargar_catalogo()
     except: df_catalogo = None
 

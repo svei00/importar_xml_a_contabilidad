@@ -15,7 +15,11 @@ bitácora técnica: qué está hecho, qué falta y qué ideas están "madurando"
 - **Referencia `RFC-ALIAS`** + administrador de alias por empresa (GUI). Alias editable
   (CFE→LUZ, etc.). Clientes (emitidas) y proveedores (recibidas) caen en la misma tabla.
 - **DIOT 2025** reescrita: una fila por RFC, base de FLUJO (PUE + REP; se omite PPD sin
-  pagar), mapa correcto de 54 columnas, col 54 = "1". `diot.py`.
+  pagar), mapa de 54 columnas alineado al instructivo oficial SAT ene-2025:
+  base 16% col 12, IVA acreditable 16% col 22 ("exclusiv. gravadas"), IVA acred.
+  8% RFN col 18, exentos col 50, tasa 0% col 51, ret IVA col 48, y col 54
+  Manifiesto = "01" (Sí). `diot.py`. (Antes caía el IVA acred. en la col 31
+  "no objeto / RFN" y el SAT rechazaba la carga.)
 - **Validador Debe=Haber** antes de escribir el TXT (`export.py::validar_balance_polizas`)
   + hoja `DIOT_LISTA` en el Excel de egresos.
 - **Retención en compras** (honorarios/servicios): se acreditan ret ISR y ret IVA → las

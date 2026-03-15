@@ -1,12 +1,23 @@
 import pandas as pd
 
 def generar_diot(df):
-    diot = pd.DataFrame()
+    filas = []
 
-    diot["RFC"] = df["rfc_emisor"]
-    diot["Tipo"] = "04"
-    diot["Operacion"] = "85"
-    diot["IVA"] = df["iva"]
-    diot["Region"] = "0"
+    for _, r in df.iterrows():
+        if r["tipo"] != "E":
+            continue
 
-    diot.to_excel("output/diot.xlsx", index=False)
+        filas.append({
+            "RFC": r["rfc_emisor"],
+            "Nombre": r["nombre_emisor"],
+            "TipoTercero": "04",   # Nacional
+            "TipoOperacion": "03", # Servicios
+            "IVA_16": r["iva"],
+            "IVA_8": 0,
+            "IVA_Exento": 0,
+            "RetencionIVA": 0,
+            "RetencionISR": 0,
+            "ImporteTotal": r["total"]
+        })
+
+    return pd.DataFrame(filas)

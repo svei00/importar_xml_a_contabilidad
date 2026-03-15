@@ -1,31 +1,59 @@
+# ml_model.py
+import pickle
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.preprocessing import OneHotEncoder
 from sklearn.linear_model import LogisticRegression
-import pickle
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
 
-def preparar_texto(row):
-    return f"{row['concepto']} {row['rfc_emisor']} {row['rfc_receptor']}"
+MODEL_FILE = "modelo.pkl"
 
-def entrenar(df):
-    df["texto"] = df.apply(preparar_texto, axis=1)
+def build_pipeline():
+    # Texto + CP
+    pre = ColumnTransformer(
+        transformers=[
+            ("txt", TfidfVectorizer(max_features=1000), "texto"),
+            ("cp", OneHotEncoder(handle_unknown="ignore"), ["cp"]),
+        ]
+    )
+    clf = LogisticRegression(max_iter=2000)
+    pipe = Pipeline(steps=[("pre", pre), ("clf", clf)])
+    return pipe
 
-    X = df["texto"]
-    y = df["cuenta"]
+def train(df: pd.DataFrame):
+    if df is None or df.empty:
+        print("⚠️ Sin datos de entrenamiento aún")
+        return
 
-    vectorizer = TfidfVectorizer(max_features=1000)
-    X_vec = vectorizer.fit_transform(X)
+    df["texto"] = (
+        df["concepto"].fillna("") + " " +
+        df["proveedor"].fillna("") + " " +
+        df["cp"].fillna("")
+    ).str.lower()
 
-    model = LogisticRegression(max_iter=1000)
-    model.fit(X_vec, y)
+    X = df[["texto", "cp"]]
+    y = df["cuenta"]  # modelo para cuenta
 
-    pickle.dump(model, open("modelo.pkl", "wb"))
-    pickle.dump(vectorizer, open("vectorizer.pkl", "wb"))
+    pipe = build_pipeline()
+    pipe.fit(X, y)
 
-def predecir(concepto, rfc_emisor, rfc_receptor):
-    model = pickle.load(open("modelo.pkl", "rb"))
-    vectorizer = pickle.load(open("vectorizer.pkl", "rb"))
+    with open(MODEL_FILE, "wb") as f:
+        pickle.dump(pipe, f)
 
-    texto = f"{concepto} {rfc_emisor} {rfc_receptor}"
-    X = vectorizer.transform([texto])
+    print("✅ Modelo entrenado")
+    
 
-    return model.predict(X)[0]
+def predict(concepto, proveedor, cp):
+    try:
+        with open(MODEL_FILE, "rb") as f:
+            pipe = pickle.load(f)
+    except:
+        return None  # fallback a reglas
+
+    df = pd.DataFrame([{
+        "texto": (concepto + " " + proveedor).lower(),
+        "cp": cp
+    }])
+    return pipe.predict(df)[0]
+

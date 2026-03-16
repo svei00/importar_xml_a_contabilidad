@@ -12,21 +12,46 @@ import pandas as pd
 def main():
     init_db()
 
-    Tk().withdraw()
-    folder = filedialog.askdirectory(title="Selecciona carpeta XML")
+    # Ocultar la ventana principal de Tkinter
+    root = Tk()
+    root.withdraw()
+    folder = filedialog.askdirectory(title="Selecciona la carpeta con los XML del SAT")
 
+    if not folder:
+        print("Operación cancelada. No se seleccionó ninguna carpeta.")
+        return
+
+    print(f"📁 Cargando XMLs desde: {folder}")
     rows = load_folder(folder)
 
-    enriched = []
+    if not rows:
+        print("⚠️ No se encontraron archivos XML válidos en la carpeta.")
+        return
 
+    enriched = []
+    cancelados_count = 0
+
+    print("🔍 Procesando facturas y validando estatus en el SAT...")
     for r in rows:
+        # 1. Validar en el SAT
         estado = validar(r["uuid"], r["rfc_emisor"], r["rfc_receptor"], r["total"])
         r["estado_sat"] = estado
 
-        # ML (fallback a regla simple si no hay modelo)
+        if estado == "CANCELADO":
+            print(f"   ⚠️ ALERTA: CFDI CANCELADO detectado -> {r['uuid']}")
+            cancelados_count += 1
+
+        # 2. Machine Learning: Predicción de cuenta
         cuenta = predict(r["concepto"], r["nombre_emisor"], r["cp"]) or "60000000"
         r["cuenta"] = cuenta
+        r["nota"] = "" # Campo extra para claridad en el Excel
 
+        # 3. Regla estricta para CFDI de Pagos
+        if r["tipo"] == "P":
+            r["cuenta"] = "10201000"  # Cuenta de Bancos
+            r["nota"] = "CFDI Pago"
+
+        # 4. Guardar en SQLite
         upsert_factura((
             r["uuid"], r["fecha"], r["tipo"],
             r["rfc_emisor"], r["rfc_receptor"],
@@ -39,22 +64,19 @@ def main():
 
     df = pd.DataFrame(enriched)
 
-    # TODO CFDI pagos
-    if r["tipo"] == "P":
-        r["cuenta"] = "10201000"  # Bancos
-        r["nota"] = "CFDI Pago"
+    print("🧠 Entrenando modelo de Machine Learning con el histórico...")
+    # Entrena si ya hay etiquetas en la base de datos
+    train_data = get_training_data()
+    if train_data is not None and not train_data.empty:
+        train(train_data)
 
-    # Entrena si ya hay etiquetas (cuando tú confirmes/ajustes)
-    train(get_training_data())
-
+    print("📊 Generando DIOT y exportando pólizas...")
     diot_df = generar_diot(df)
-
     exportar(df, diot_df)
 
-    if estado == "CANCELADO":
-        print(f"⚠️ CFDI CANCELADO: {r['uuid']}")
-
-    print("✅ Proceso completo. Archivo: salida.xlsx")
+    print("\n✅ PROCESO COMPLETO. Archivo generado: salida.xlsx")
+    if cancelados_count > 0:
+        print(f"🚨 IMPORTANTE: Se encontraron {cancelados_count} facturas CANCELADAS. Revísalas antes de provisionar.")
 
 if __name__ == "__main__":
     main()

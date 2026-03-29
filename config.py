@@ -6,14 +6,15 @@ from tkinter import filedialog, Tk
 SETTINGS_FILE = "settings.json"
 
 def load_settings():
-    """Carga configuraciones dinámicas. Si no existen, crea un template."""
     if not os.path.exists(SETTINGS_FILE):
         default_settings = {
             "catalogo_path": "",
+            "last_ingresos_path": "/",
+            "last_egresos_path": "/",
             "cuentas_default": {
-                "bancos": "",       # Déjalo en blanco, el ML aprenderá tus cuentas reales
-                "iva_acreditable": "", 
-                "gastos_generales": ""
+                "bancos": "10201000",       
+                "iva_acreditable": "11801000", 
+                "gastos_generales": "60000000"
             }
         }
         with open(SETTINGS_FILE, "w") as f:
@@ -28,7 +29,6 @@ def save_settings(settings):
         json.dump(settings, f, indent=4)
 
 def cargar_catalogo():
-    """Abre una ventana si no sabe dónde está el TXT, y luego lo lee."""
     settings = load_settings()
     ruta = settings.get("catalogo_path", "")
 
@@ -37,20 +37,29 @@ def cargar_catalogo():
         root = Tk()
         root.withdraw()
         ruta = filedialog.askopenfilename(
-            title="Selecciona tu catálogo exportado de ContpaqI",
+            title="Selecciona tu catálogo exportado",
             filetypes=[("Text Files", "*.txt"), ("Excel Files", "*.xlsx"), ("All Files", "*.*")]
         )
         if ruta:
             settings["catalogo_path"] = ruta
             save_settings(settings)
         else:
-            print("❌ No se seleccionó catálogo. El sistema correrá a ciegas.")
             return pd.DataFrame()
 
     try:
-        df = pd.read_csv(ruta, sep='\t', dtype=str) # Asume tabulaciones
-        print(f"✅ Catálogo cargado desde: {ruta} ({len(df)} cuentas).")
+        df = pd.read_csv(ruta, sep='\t', dtype=str) 
         return df
     except Exception as e:
         print(f"❌ Error al leer el catálogo: {e}")
         return pd.DataFrame()
+
+def validar_cuenta_vs_sat(cuenta_predicha, df_catalogo):
+    if df_catalogo.empty:
+        return "Sin validar"
+        
+    match = df_catalogo[df_catalogo.iloc[:, 0] == str(cuenta_predicha)]
+    
+    if not match.empty:
+        return "OK (En catálogo)"
+    else:
+        return "⚠️ Revisar: Cuenta no en catálogo"

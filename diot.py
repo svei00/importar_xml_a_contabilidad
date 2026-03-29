@@ -1,29 +1,28 @@
+# diot.py
 import pandas as pd
-import os
 
 def determinar_tipo_tercero(rfc):
-    if rfc == "XEXX010101000": return "05" # Extranjero
-    elif rfc == "XAXX010101000": return "15" # Global
-    return "04" # Nacional
+    if rfc == "XEXX010101000": return "05" 
+    elif rfc == "XAXX010101000": return "15" 
+    return "04" 
 
 def determinar_tipo_operacion(concepto):
     concepto_lower = concepto.lower()
     if "arrendamiento" in concepto_lower or "renta" in concepto_lower: return "06"
     elif "honorarios" in concepto_lower or "servicios profesionales" in concepto_lower: return "03"
-    return "85" # Otros
+    return "85" 
 
 def generar_diot(df):
-    """Estructura la información para revisión en Excel."""
     filas = []
     for _, r in df.iterrows():
-        if r["tipo"] not in ["I", "E"]: # Ajusta según si lees tus egresos
+        if r["tipo"] not in ["I", "E"]: 
             continue
             
         filas.append({
             "TipoTercero": determinar_tipo_tercero(r["rfc_emisor"]),   
             "TipoOperacion": determinar_tipo_operacion(r["concepto"]), 
             "RFC": r["rfc_emisor"],
-            "Monto_IVA_16": int(round(r["iva_16"] / 0.16)) if r["iva_16"] > 0 else 0, # SAT pide la BASE, no el impuesto
+            "Monto_IVA_16": int(round(r["iva_16"] / 0.16)) if r["iva_16"] > 0 else 0,
             "Monto_IVA_8": int(round(r["iva_8"] / 0.08)) if r["iva_8"] > 0 else 0,
             "Monto_IVA_Exento": int(round(r["iva_exento"])),
             "Retencion_IVA": int(round(r["ret_iva"])),
@@ -32,11 +31,6 @@ def generar_diot(df):
     return pd.DataFrame(filas)
 
 def exportar_txt_sat(df_diot, mes, anio, tipo="N"):
-    """
-    EXPANSIÓN: Genera el archivo TXT separado por pipes (|) 
-    con la nomenclatura exacta que pediste.
-    Ejemplo: '01. Ene 2026 N DIOT.txt'
-    """
     if df_diot.empty:
         return
         
@@ -48,8 +42,7 @@ def exportar_txt_sat(df_diot, mes, anio, tipo="N"):
     
     with open(filename, 'w', encoding='utf-8') as f:
         for _, r in df_diot.iterrows():
-            # El layout del SAT tiene 24 columnas. Llenamos las principales y dejamos vacías las demás.
             linea = f"{r['TipoTercero']}|{r['TipoOperacion']}|||{r['RFC']}|||||{r['Monto_IVA_16']}||{r['Monto_IVA_8']}||||||||{r['Monto_IVA_Exento']}|||{r['Retencion_IVA']}|0|\n"
             f.write(linea)
             
-    print(f"✅ Archivo DIOT para el SAT generado: {filename}")
+    print(f"✅ Archivo TXT para la DIOT generado exitosamente: {filename}")

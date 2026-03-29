@@ -1,0 +1,14 @@
+# Entornos virtuales
+venv/
+env/
+
+# Archivos cacheados de Python
+__pycache__/
+*.pyc
+
+# Bases de datos y configuraciones locales
+empresas/
+settings.json
+salida.xlsx
+*.txt
+*.db

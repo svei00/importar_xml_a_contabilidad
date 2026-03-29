@@ -11,6 +11,7 @@ def load_settings():
             "catalogo_path": "",
             "last_ingresos_path": "/",
             "last_egresos_path": "/",
+            "output_path": "", 
             "cuentas_default": {
                 "bancos": "10201000",       
                 "iva_acreditable": "11801000", 
@@ -47,7 +48,9 @@ def cargar_catalogo():
             return pd.DataFrame()
 
     try:
-        df = pd.read_csv(ruta, sep='\t', dtype=str) 
+        # ¡LA SOLUCIÓN AL ERROR DE UTF-8 ESTÁ AQUÍ (encoding='latin1')!
+        df = pd.read_csv(ruta, sep='\t', dtype=str, encoding='latin1') 
+        print(f"✅ Catálogo cargado: {len(df)} cuentas listas.")
         return df
     except Exception as e:
         print(f"❌ Error al leer el catálogo: {e}")

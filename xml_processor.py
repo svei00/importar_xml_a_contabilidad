@@ -1,4 +1,5 @@
 import os
+import zipfile
 import xml.etree.ElementTree as ET
 
 NS = {
@@ -6,8 +7,8 @@ NS = {
     'tfd': 'http://www.sat.gob.mx/TimbreFiscalDigital'
 }
 
-def parse_xml(path):
-    tree = ET.parse(path)
+def parse_xml(source):
+    tree = ET.parse(source)
     root = tree.getroot()
 
     tipo = root.attrib.get("TipoDeComprobante", "")
@@ -54,6 +55,7 @@ def parse_xml(path):
         "uuid": uuid, "tipo": tipo, "fecha": root.attrib.get("Fecha"),
         "rfc_emisor": rfc_emisor, "rfc_receptor": rfc_receptor,
         "nombre_emisor": em.attrib.get("Nombre", "") if em is not None else "",
+        "nombre_receptor": re.attrib.get("Nombre", "") if re is not None else "", # <--- ¡LA SOLUCIÓN AL KEYERROR!
         "concepto": concepto, "subtotal": subtotal, "total": total, "cp": cp,
         "iva_16": iva_16, "iva_8": iva_8, "iva_exento": iva_exento,
         "ret_iva": ret_iva, "ret_isr": ret_isr
@@ -62,11 +64,28 @@ def parse_xml(path):
 def load_folder(folder):
     rows = []
     for f in os.listdir(folder):
+        full_path = os.path.join(folder, f)
+        
         if f.lower().endswith(".xml"):
             try:
-                rows.append(parse_xml(os.path.join(folder, f)))
+                rows.append(parse_xml(full_path))
             except Exception as e:
                 print(f"❌ Error parseando {f}: {e}")
+                
+        elif f.lower().endswith(".zip"):
+            print(f"📦 Extrayendo facturas de {f}...")
+            try:
+                with zipfile.ZipFile(full_path, 'r') as z:
+                    for xml_name in z.namelist():
+                        if xml_name.lower().endswith(".xml"):
+                            with z.open(xml_name) as xml_file:
+                                try:
+                                    rows.append(parse_xml(xml_file))
+                                except Exception as e:
+                                    print(f"❌ Error leyendo XML dentro de ZIP {xml_name}: {e}")
+            except Exception as e:
+                print(f"❌ Error al abrir el ZIP {f}: {e}")
+                
     return rows
 
 def es_pago(tipo):

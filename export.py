@@ -7,7 +7,6 @@ def generar_polizas(df):
     settings = load_settings()
     cuentas_def = settings.get("cuentas_default", {})
     
-    # Cuentas base
     c_banco = cuentas_def.get("bancos", "10201000")
     c_iva_pagado = cuentas_def.get("iva_acreditable", "11801000")
     c_iva_pdte_pago = cuentas_def.get("iva_pdte_pago", "11802000")
@@ -20,53 +19,40 @@ def generar_polizas(df):
     pol = []
     num = 1
 
-    # --- 1. PROCESAR INGRESOS Y EGRESOS ---
     facturas = df[df['tipo'].isin(['I', 'E'])]
     
     for _, r in facturas.iterrows():
         concepto_recortado = str(r["concepto"])[:50]
-        
-        # EL TRUCO DEL CUADRE (Absorber IEPS y Ajustes en el Gasto/Ingreso)
-        # Gasto Real = Total - IVA + Retenciones
+        # Absorber IEPS y Ajustes en el Gasto/Ingreso
         monto_principal_ajustado = round(r["total"] - r["iva_16"] - r["iva_8"] + r["ret_iva"] + r["ret_isr"], 2)
         
-        # LOGICA EGRESOS (COMPRAS/GASTOS)
         if r["tipo"] == "E":
             c_gasto = r["cuenta"]
-            
             if r["metodo_pago"] == "PPD":
-                # PROVISIÓN (Diario)
                 pol.append([num, "Diario", c_gasto, monto_principal_ajustado, 0, concepto_recortado, r["uuid"]])
                 if r["iva_16"] > 0:
                     pol.append([num, "Diario", c_iva_pdte_pago, r["iva_16"], 0, "IVA Pdte Pago", r["uuid"]])
                 pol.append([num, "Diario", c_proveedores, 0, r["total"], r["nombre_emisor"][:50], r["uuid"]])
             else: 
-                # PAGO INMEDIATO (Egreso PUE)
                 pol.append([num, "Egreso", c_gasto, monto_principal_ajustado, 0, concepto_recortado, r["uuid"]])
                 if r["iva_16"] > 0:
-                    pol.append([num, "Egreso", c_iva_pagado, r["iva_16"], 0, "IVA Acreditable Pagado", r["uuid"]])
+                    pol.append([num, "Egreso", c_iva_pagado, r["iva_16"], 0, "IVA Acreditable", r["uuid"]])
                 pol.append([num, "Egreso", c_banco, 0, r["total"], r["nombre_emisor"][:50], r["uuid"]])
 
-        # LOGICA INGRESOS (VENTAS)
         elif r["tipo"] == "I":
             c_ingreso = r["cuenta"] if r["cuenta"] != "60000000" else c_ventas 
-            
             if r["metodo_pago"] == "PPD":
-                # PROVISIÓN (Diario)
                 pol.append([num, "Diario", c_clientes, r["total"], 0, r["nombre_receptor"][:50], r["uuid"]])
                 pol.append([num, "Diario", c_ingreso, 0, monto_principal_ajustado, concepto_recortado, r["uuid"]])
                 if r["iva_16"] > 0:
                     pol.append([num, "Diario", c_iva_pdte_cobro, 0, r["iva_16"], "IVA Pdte Cobro", r["uuid"]])
             else: 
-                # COBRO INMEDIATO (Ingreso PUE)
                 pol.append([num, "Ingreso", c_banco, r["total"], 0, r["nombre_receptor"][:50], r["uuid"]])
                 pol.append([num, "Ingreso", c_ingreso, 0, monto_principal_ajustado, concepto_recortado, r["uuid"]])
                 if r["iva_16"] > 0:
                     pol.append([num, "Ingreso", c_iva_cobrado, 0, r["iva_16"], "IVA Cobrado", r["uuid"]])
-        
         num += 1
 
-    # --- 2. PROCESAR NÓMINAS (AGRUPADAS) ---
     nominas = df[df['tipo'] == 'N']
     if not nominas.empty:
         for depto, grupo in nominas.groupby('departamento'):
@@ -77,14 +63,33 @@ def generar_polizas(df):
             c_nomina = cuentas_def.get("gastos_generales", "60000000")
             c_impuestos_ret = cuentas_def.get("retenciones", "21601000")
             
-            concepto_nomina = f"Provisión Nómina - {depto}"
-            pol.append([num, "Diario", c_nomina, total_sueldos, 0, concepto_nomina[:50], ""])
+            pol.append([num, "Diario", c_nomina, total_sueldos, 0, f"Provisión Nómina - {depto}"[:50], ""])
             if total_ret_isr > 0:
                 pol.append([num, "Diario", c_impuestos_ret, 0, total_ret_isr, f"Ret ISR Nomina {depto}", ""])
             pol.append([num, "Diario", c_banco, 0, total_neto, f"Neto a Pagar {depto}", ""])
             num += 1
 
     return pd.DataFrame(pol, columns=["Numero", "Tipo", "Cuenta", "Debe", "Haber", "Concepto", "UUID"])
+
+def generar_sugerencia(row):
+    """Motor de sugerencias inteligentes para cuando el ML aún no sabe la cuenta."""
+    cuenta = str(row["cuenta"])
+    if cuenta != "60000000":
+        return "🧠 Aprendido por IA"
+        
+    texto = (str(row["concepto"]) + " " + str(row["nombre_emisor"])).lower()
+    
+    # Bancos
+    if "bbva" in texto or "bancomer" in texto: return "102-01-001 (Sugerido BBVA)"
+    if "banamex" in texto or "citibanamex" in texto: return "102-01-002 (Sugerido Banamex)"
+    if "santander" in texto: return "102-01-003 (Sugerido Santander)"
+    if "banorte" in texto: return "102-01-004 (Sugerido Banorte)"
+    
+    # Servicios
+    if "cfe" in texto or "electricidad" in texto: return "600-40-200 (Sugerido CFE)"
+    if "telmex" in texto or "telecom" in texto: return "600-40-100 (Sugerido Telmex)"
+    
+    return "601-84-000 (Sugerido Gastos Gen.)"
 
 def auto_ajustar_columnas_openpyxl(writer, sheet_name, df):
     worksheet = writer.sheets[sheet_name]
@@ -107,7 +112,8 @@ def exportar(df, diot_df, output_dir, filename, log_data):
         {"Métrica": "⚠️ RECORDATORIO CRÍTICO", "Cantidad": "CARGA LOS XML AL ADD ANTES DE IMPORTAR ESTE EXCEL"}
     ])
 
-    df["Sugerencia_SAT"] = df["cuenta"].apply(lambda x: "601-84-000 (Sugerido)" if str(x) == "60000000" else "Aprendido por IA")
+    # Aplicamos el motor de sugerencias inteligentes
+    df["Sugerencia_SAT"] = df.apply(generar_sugerencia, axis=1)
 
     with pd.ExcelWriter(filepath, engine='openpyxl') as w:
         resumen_df.to_excel(w, sheet_name="RESUMEN_LOG", index=False)

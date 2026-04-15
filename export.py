@@ -7,89 +7,131 @@ def generar_polizas(df):
     settings = load_settings()
     cuentas_def = settings.get("cuentas_default", {})
     
-    c_banco = cuentas_def.get("bancos", "10201000")
-    c_iva_pagado = cuentas_def.get("iva_acreditable", "11801000")
-    c_iva_pdte_pago = cuentas_def.get("iva_pdte_pago", "11802000")
-    c_proveedores = cuentas_def.get("proveedores", "20101000")
-    c_clientes = cuentas_def.get("clientes", "10501000")
-    c_ventas = cuentas_def.get("ventas", "40101000")
-    c_iva_cobrado = cuentas_def.get("iva_trasladado", "20801000")
-    c_iva_pdte_cobro = cuentas_def.get("iva_pdte_cobro", "20802000")
+    # Base accounts mapped from settings.json
+    c_banco = cuentas_def.get("bancos", "FALTA_CUENTA_BANCO")
+    c_iva_pagado = cuentas_def.get("iva_acreditable", "FALTA_CUENTA_IVA")
+    c_iva_pdte_pago = cuentas_def.get("iva_pdte_pago", "FALTA_CUENTA_IVA_PDTE")
+    c_proveedores = cuentas_def.get("proveedores", "FALTA_CUENTA_PROV")
+    c_clientes = cuentas_def.get("clientes", "FALTA_CUENTA_CLI")
+    c_ventas = cuentas_def.get("ventas", "FALTA_CUENTA_VENTAS")
+    c_iva_cobrado = cuentas_def.get("iva_trasladado", "FALTA_IVA_TRASLADADO")
+    c_iva_pdte_cobro = cuentas_def.get("iva_pdte_cobro", "FALTA_IVA_PDTE_COBRO")
     
     pol = []
     num = 1
+    df = df.fillna(0)
 
+    # --- 1. FACTURAS NORMALES (I, E) ---
     facturas = df[df['tipo'].isin(['I', 'E'])]
     
     for _, r in facturas.iterrows():
         concepto_recortado = str(r["concepto"])[:50]
-        # Absorber IEPS y Ajustes en el Gasto/Ingreso
-        monto_principal_ajustado = round(r["total"] - r["iva_16"] - r["iva_8"] + r["ret_iva"] + r["ret_isr"], 2)
+        cuenta_asignada = str(r.get("cuenta", "")).strip()
+        c_gasto_ingreso = cuenta_asignada if cuenta_asignada and cuenta_asignada != "0" else "PENDIENTE"
+        
+        total = float(r["total"])
+        iva_16 = float(r["iva_16"])
+        iva_8 = float(r["iva_8"])
+        ret_iva = float(r["ret_iva"])
+        ret_isr = float(r["ret_isr"])
+        monto_ajustado = round(total - iva_16 - iva_8 + ret_iva + ret_isr, 2)
         
         if r["tipo"] == "E":
-            c_gasto = r["cuenta"]
-            if r["metodo_pago"] == "PPD":
-                pol.append([num, "Diario", c_gasto, monto_principal_ajustado, 0, concepto_recortado, r["uuid"]])
-                if r["iva_16"] > 0:
-                    pol.append([num, "Diario", c_iva_pdte_pago, r["iva_16"], 0, "IVA Pdte Pago", r["uuid"]])
-                pol.append([num, "Diario", c_proveedores, 0, r["total"], r["nombre_emisor"][:50], r["uuid"]])
+            if r.get("metodo_pago", "PUE") == "PPD":
+                # PROVISIÓN PPD
+                pol.append([num, "Diario", c_gasto_ingreso, monto_ajustado, 0, concepto_recortado, r["uuid"]])
+                if iva_16 > 0: pol.append([num, "Diario", c_iva_pdte_pago, iva_16, 0, "IVA Pdte Pago", r["uuid"]])
+                pol.append([num, "Diario", c_proveedores, 0, total, str(r["nombre_emisor"])[:50], r["uuid"]])
             else: 
-                pol.append([num, "Egreso", c_gasto, monto_principal_ajustado, 0, concepto_recortado, r["uuid"]])
-                if r["iva_16"] > 0:
-                    pol.append([num, "Egreso", c_iva_pagado, r["iva_16"], 0, "IVA Acreditable", r["uuid"]])
-                pol.append([num, "Egreso", c_banco, 0, r["total"], r["nombre_emisor"][:50], r["uuid"]])
+                # EGRESO PUE
+                pol.append([num, "Egreso", c_gasto_ingreso, monto_ajustado, 0, concepto_recortado, r["uuid"]])
+                if iva_16 > 0: pol.append([num, "Egreso", c_iva_pagado, iva_16, 0, "IVA Acreditable", r["uuid"]])
+                pol.append([num, "Egreso", c_banco, 0, total, str(r["nombre_emisor"])[:50], r["uuid"]])
 
         elif r["tipo"] == "I":
-            c_ingreso = r["cuenta"] if r["cuenta"] != "60000000" else c_ventas 
-            if r["metodo_pago"] == "PPD":
-                pol.append([num, "Diario", c_clientes, r["total"], 0, r["nombre_receptor"][:50], r["uuid"]])
-                pol.append([num, "Diario", c_ingreso, 0, monto_principal_ajustado, concepto_recortado, r["uuid"]])
-                if r["iva_16"] > 0:
-                    pol.append([num, "Diario", c_iva_pdte_cobro, 0, r["iva_16"], "IVA Pdte Cobro", r["uuid"]])
+            c_gasto_ingreso = c_gasto_ingreso if c_gasto_ingreso != "PENDIENTE" else c_ventas 
+            if r.get("metodo_pago", "PUE") == "PPD":
+                # PROVISIÓN PPD (Venta)
+                pol.append([num, "Diario", c_clientes, total, 0, str(r["nombre_receptor"])[:50], r["uuid"]])
+                pol.append([num, "Diario", c_gasto_ingreso, 0, monto_ajustado, concepto_recortado, r["uuid"]])
+                if iva_16 > 0: pol.append([num, "Diario", c_iva_pdte_cobro, 0, iva_16, "IVA Pdte Cobro", r["uuid"]])
             else: 
-                pol.append([num, "Ingreso", c_banco, r["total"], 0, r["nombre_receptor"][:50], r["uuid"]])
-                pol.append([num, "Ingreso", c_ingreso, 0, monto_principal_ajustado, concepto_recortado, r["uuid"]])
-                if r["iva_16"] > 0:
-                    pol.append([num, "Ingreso", c_iva_cobrado, 0, r["iva_16"], "IVA Cobrado", r["uuid"]])
+                # INGRESO PUE (Cobro)
+                pol.append([num, "Ingreso", c_banco, total, 0, str(r["nombre_receptor"])[:50], r["uuid"]])
+                pol.append([num, "Ingreso", c_gasto_ingreso, 0, monto_ajustado, concepto_recortado, r["uuid"]])
+                if iva_16 > 0: pol.append([num, "Ingreso", c_iva_cobrado, 0, iva_16, "IVA Cobrado", r["uuid"]])
         num += 1
 
+    # --- 2. NÓMINAS AGRUPADAS (N) ---
     nominas = df[df['tipo'] == 'N']
     if not nominas.empty:
+        c_nomina = cuentas_def.get("nomina", "FALTA_CUENTA_NOMINA")
+        c_impuestos_ret = cuentas_def.get("retenciones", "FALTA_CUENTA_RETENCIONES")
+        
         for depto, grupo in nominas.groupby('departamento'):
-            total_sueldos = grupo['subtotal'].sum()
-            total_neto = grupo['total'].sum()
-            total_ret_isr = grupo['ret_isr'].sum()
+            total_sueldos = float(grupo['subtotal'].sum())
+            total_neto = float(grupo['total'].sum())
+            total_ret_isr = float(grupo['ret_isr'].sum())
             
-            c_nomina = cuentas_def.get("gastos_generales", "60000000")
-            c_impuestos_ret = cuentas_def.get("retenciones", "21601000")
-            
-            pol.append([num, "Diario", c_nomina, total_sueldos, 0, f"Provisión Nómina - {depto}"[:50], ""])
+            pol.append([num, "Diario", c_nomina, total_sueldos, 0, f"Provisión Nómina {depto}"[:50], ""])
             if total_ret_isr > 0:
                 pol.append([num, "Diario", c_impuestos_ret, 0, total_ret_isr, f"Ret ISR Nomina {depto}", ""])
             pol.append([num, "Diario", c_banco, 0, total_neto, f"Neto a Pagar {depto}", ""])
             num += 1
 
+    # --- 3. PAGOS / REP (P) ---
+    pagos = df[df['tipo'] == 'P']
+    if not pagos.empty:
+        for _, r in pagos.iterrows():
+            total = float(r["total"])
+            # Extraemos el IVA del REP (si lo tiene)
+            iva_16 = float(r["iva_16"])
+            
+            # Asumimos que los REPs en la carpeta 'Recibidas' son pagos a proveedores
+            # Si estuviéramos en la carpeta 'Emitidas', serían cobros de clientes.
+            # (El script principal tendría que pasar el 'tipo_operacion' a esta función para ser 100% exacto, 
+            # pero por ahora lo tratamos como un pago a proveedor para cuadrar con el PPD de Telmex).
+            
+            concepto = f"Pago a Proveedor REP - {str(r['nombre_emisor'])[:30]}"
+            
+            pol.append([num, "Egreso", c_proveedores, total, 0, concepto, r["uuid"]])
+            if iva_16 > 0:
+                pol.append([num, "Egreso", c_iva_pagado, iva_16, 0, "Traspaso IVA Pagado", r["uuid"]])
+                pol.append([num, "Egreso", c_iva_pdte_pago, 0, iva_16, "Cance. IVA Pdte", r["uuid"]])
+            pol.append([num, "Egreso", c_banco, 0, total, "Pago desde Banco", r["uuid"]])
+            
+            num += 1
+
     return pd.DataFrame(pol, columns=["Numero", "Tipo", "Cuenta", "Debe", "Haber", "Concepto", "UUID"])
 
-def generar_sugerencia(row):
-    """Motor de sugerencias inteligentes para cuando el ML aún no sabe la cuenta."""
-    cuenta = str(row["cuenta"])
-    if cuenta != "60000000":
-        return "🧠 Aprendido por IA"
+def generar_sugerencia_dinamica(row, df_catalogo):
+    cuenta_actual = str(row.get("cuenta", "")).strip()
+    
+    if cuenta_actual and cuenta_actual not in ["0", "PENDIENTE"]:
+        return "🧠 Asignado por IA"
+
+    if df_catalogo is None or df_catalogo.empty:
+        return "⚠️ Carga el catálogo (cuentas.txt) para ver sugerencias"
+
+    nombre_emisor = str(row.get("nombre_emisor", "")).upper()
+    palabras_basura = ['S.A.', 'DE', 'C.V.', 'SAB', 'RL', 'SA', 'CV', 'S', 'A', 'C', 'V']
+    palabras = [p for p in nombre_emisor.split() if p not in palabras_basura and len(p) > 2]
+    
+    if not palabras:
+        return "Requiere Clasificación Manual"
         
-    texto = (str(row["concepto"]) + " " + str(row["nombre_emisor"])).lower()
-    
-    # Bancos
-    if "bbva" in texto or "bancomer" in texto: return "102-01-001 (Sugerido BBVA)"
-    if "banamex" in texto or "citibanamex" in texto: return "102-01-002 (Sugerido Banamex)"
-    if "santander" in texto: return "102-01-003 (Sugerido Santander)"
-    if "banorte" in texto: return "102-01-004 (Sugerido Banorte)"
-    
-    # Servicios
-    if "cfe" in texto or "electricidad" in texto: return "600-40-200 (Sugerido CFE)"
-    if "telmex" in texto or "telecom" in texto: return "600-40-100 (Sugerido Telmex)"
-    
-    return "601-84-000 (Sugerido Gastos Gen.)"
+    palabra_clave = palabras[0]
+
+    try:
+        coincidencias = df_catalogo[df_catalogo.iloc[:, 1].str.upper().str.contains(palabra_clave, na=False)]
+        if not coincidencias.empty:
+            cuenta_sug = coincidencias.iloc[0, 0] 
+            nombre_sug = coincidencias.iloc[0, 1] 
+            return f"💡 Encontrado en Catálogo: {cuenta_sug} ({nombre_sug})"
+    except Exception:
+        pass
+        
+    return "Requiere Clasificación Manual"
 
 def auto_ajustar_columnas_openpyxl(writer, sheet_name, df):
     worksheet = writer.sheets[sheet_name]
@@ -100,20 +142,19 @@ def auto_ajustar_columnas_openpyxl(writer, sheet_name, df):
         col_letter = get_column_letter(i + 1)
         worksheet.column_dimensions[col_letter].width = max_len
 
-def exportar(df, diot_df, output_dir, filename, log_data):
+def exportar(df, diot_df, output_dir, filename, log_data, df_catalogo):
     filepath = os.path.join(output_dir, filename)
     
     resumen_df = pd.DataFrame([
-        {"Métrica": "Total de XMLs Analizados", "Cantidad": log_data["total"]},
-        {"Métrica": "Facturas Procesadas (PUE/PPD Evaluado)", "Cantidad": log_data["validas"]},
-        {"Métrica": "Nóminas Agrupadas por Depto (Sin UUID)", "Cantidad": log_data["nominas"]},
-        {"Métrica": "CFDI de Pagos Encontrados", "Cantidad": log_data["pagos"]},
-        {"Métrica": "CFDI Cancelados (¡Revisar!)", "Cantidad": log_data["cancelados"]},
-        {"Métrica": "⚠️ RECORDATORIO CRÍTICO", "Cantidad": "CARGA LOS XML AL ADD ANTES DE IMPORTAR ESTE EXCEL"}
+        {"Métrica": "Total de XMLs Analizados", "Cantidad": log_data.get("total", 0)},
+        {"Métrica": "Facturas Procesadas (PUE/PPD)", "Cantidad": log_data.get("validas", 0)},
+        {"Métrica": "Nóminas Agrupadas (Sin UUID)", "Cantidad": log_data.get("nominas", 0)},
+        {"Métrica": "CFDI de Pagos (REPs) Procesados", "Cantidad": log_data.get("pagos", 0)},
+        {"Métrica": "CFDI Cancelados (Revisar)", "Cantidad": log_data.get("cancelados", 0)},
+        {"Métrica": "⚠️ RECORDATORIO", "Cantidad": "SUBE LOS XML AL ADD ANTES DE IMPORTAR"}
     ])
 
-    # Aplicamos el motor de sugerencias inteligentes
-    df["Sugerencia_SAT"] = df.apply(generar_sugerencia, axis=1)
+    df["Sugerencia_Catálogo"] = df.apply(lambda row: generar_sugerencia_dinamica(row, df_catalogo), axis=1)
 
     with pd.ExcelWriter(filepath, engine='openpyxl') as w:
         resumen_df.to_excel(w, sheet_name="RESUMEN_LOG", index=False)

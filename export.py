@@ -1,13 +1,13 @@
 # export.py
 import pandas as pd
 import os
-from config import load_settings
+from config import load_settings, cargar_catalogo
 
 def generar_polizas(df):
     settings = load_settings()
     cuentas_def = settings.get("cuentas_default", {})
     
-    # Base accounts mapped from settings.json
+    # Cuentas dinámicas desde settings.json (¡Cero hardcoding!)
     c_banco = cuentas_def.get("bancos", "FALTA_CUENTA_BANCO")
     c_iva_pagado = cuentas_def.get("iva_acreditable", "FALTA_CUENTA_IVA")
     c_iva_pdte_pago = cuentas_def.get("iva_pdte_pago", "FALTA_CUENTA_IVA_PDTE")
@@ -38,12 +38,10 @@ def generar_polizas(df):
         
         if r["tipo"] == "E":
             if r.get("metodo_pago", "PUE") == "PPD":
-                # PROVISIÓN PPD
                 pol.append([num, "Diario", c_gasto_ingreso, monto_ajustado, 0, concepto_recortado, r["uuid"]])
                 if iva_16 > 0: pol.append([num, "Diario", c_iva_pdte_pago, iva_16, 0, "IVA Pdte Pago", r["uuid"]])
                 pol.append([num, "Diario", c_proveedores, 0, total, str(r["nombre_emisor"])[:50], r["uuid"]])
             else: 
-                # EGRESO PUE
                 pol.append([num, "Egreso", c_gasto_ingreso, monto_ajustado, 0, concepto_recortado, r["uuid"]])
                 if iva_16 > 0: pol.append([num, "Egreso", c_iva_pagado, iva_16, 0, "IVA Acreditable", r["uuid"]])
                 pol.append([num, "Egreso", c_banco, 0, total, str(r["nombre_emisor"])[:50], r["uuid"]])
@@ -51,12 +49,10 @@ def generar_polizas(df):
         elif r["tipo"] == "I":
             c_gasto_ingreso = c_gasto_ingreso if c_gasto_ingreso != "PENDIENTE" else c_ventas 
             if r.get("metodo_pago", "PUE") == "PPD":
-                # PROVISIÓN PPD (Venta)
                 pol.append([num, "Diario", c_clientes, total, 0, str(r["nombre_receptor"])[:50], r["uuid"]])
                 pol.append([num, "Diario", c_gasto_ingreso, 0, monto_ajustado, concepto_recortado, r["uuid"]])
                 if iva_16 > 0: pol.append([num, "Diario", c_iva_pdte_cobro, 0, iva_16, "IVA Pdte Cobro", r["uuid"]])
             else: 
-                # INGRESO PUE (Cobro)
                 pol.append([num, "Ingreso", c_banco, total, 0, str(r["nombre_receptor"])[:50], r["uuid"]])
                 pol.append([num, "Ingreso", c_gasto_ingreso, 0, monto_ajustado, concepto_recortado, r["uuid"]])
                 if iva_16 > 0: pol.append([num, "Ingreso", c_iva_cobrado, 0, iva_16, "IVA Cobrado", r["uuid"]])
@@ -84,14 +80,7 @@ def generar_polizas(df):
     if not pagos.empty:
         for _, r in pagos.iterrows():
             total = float(r["total"])
-            # Extraemos el IVA del REP (si lo tiene)
             iva_16 = float(r["iva_16"])
-            
-            # Asumimos que los REPs en la carpeta 'Recibidas' son pagos a proveedores
-            # Si estuviéramos en la carpeta 'Emitidas', serían cobros de clientes.
-            # (El script principal tendría que pasar el 'tipo_operacion' a esta función para ser 100% exacto, 
-            # pero por ahora lo tratamos como un pago a proveedor para cuadrar con el PPD de Telmex).
-            
             concepto = f"Pago a Proveedor REP - {str(r['nombre_emisor'])[:30]}"
             
             pol.append([num, "Egreso", c_proveedores, total, 0, concepto, r["uuid"]])
@@ -99,19 +88,19 @@ def generar_polizas(df):
                 pol.append([num, "Egreso", c_iva_pagado, iva_16, 0, "Traspaso IVA Pagado", r["uuid"]])
                 pol.append([num, "Egreso", c_iva_pdte_pago, 0, iva_16, "Cance. IVA Pdte", r["uuid"]])
             pol.append([num, "Egreso", c_banco, 0, total, "Pago desde Banco", r["uuid"]])
-            
             num += 1
 
     return pd.DataFrame(pol, columns=["Numero", "Tipo", "Cuenta", "Debe", "Haber", "Concepto", "UUID"])
 
 def generar_sugerencia_dinamica(row, df_catalogo):
+    """Sugerencia inteligente leyendo tu catálogo real (Cuentas.txt)"""
     cuenta_actual = str(row.get("cuenta", "")).strip()
     
     if cuenta_actual and cuenta_actual not in ["0", "PENDIENTE"]:
         return "🧠 Asignado por IA"
 
     if df_catalogo is None or df_catalogo.empty:
-        return "⚠️ Carga el catálogo (cuentas.txt) para ver sugerencias"
+        return "⚠️ Carga tu catálogo para ver sugerencias"
 
     nombre_emisor = str(row.get("nombre_emisor", "")).upper()
     palabras_basura = ['S.A.', 'DE', 'C.V.', 'SAB', 'RL', 'SA', 'CV', 'S', 'A', 'C', 'V']
@@ -142,8 +131,12 @@ def auto_ajustar_columnas_openpyxl(writer, sheet_name, df):
         col_letter = get_column_letter(i + 1)
         worksheet.column_dimensions[col_letter].width = max_len
 
-def exportar(df, diot_df, output_dir, filename, log_data, df_catalogo):
+# ¡NOTA: Se regresó a 5 parámetros para que sea 100% compatible con tu main.py actual!
+def exportar(df, diot_df, output_dir, filename, log_data):
     filepath = os.path.join(output_dir, filename)
+    
+    # Carga el catálogo internamente sin molestar a main.py
+    df_catalogo = cargar_catalogo()
     
     resumen_df = pd.DataFrame([
         {"Métrica": "Total de XMLs Analizados", "Cantidad": log_data.get("total", 0)},
@@ -171,4 +164,18 @@ def exportar(df, diot_df, output_dir, filename, log_data, df_catalogo):
             diot_df.to_excel(w, sheet_name="DIOT_LISTA", index=False)
             auto_ajustar_columnas_openpyxl(w, "DIOT_LISTA", diot_df)
             
+    # --- MENSAJE DE ÉXITO Y APERTURA DE CARPETA AUTOMÁTICA ---
+    print("\n" + "="*50)
+    print("✅ ¡PROCESO FINALIZADO CON ÉXITO!")
+    print(f"📁 Excel generado en: {output_dir.replace(chr(92), '/')}")
+    print(f"📄 Nombre: {filename}")
+    print("="*50 + "\n")
+    
+    try:
+        # Esto abre mágicamente la carpeta en Windows al terminar
+        if os.name == 'nt':
+            os.startfile(output_dir)
+    except Exception:
+        pass
+        
     return filepath

@@ -119,36 +119,58 @@ def process_folder(folder_path, tipo_operacion):
     print(f"✅ ¡PROCESO COMPLETO! Excel guardado en: {output_dir}")
 
 def learn_from_excel_ui():
+    from export import exportar_txt_contpaqi # Aseguramos importar el generador de TXT
+    
     filepath = filedialog.askopenfilename(title="Selecciona el Excel Corregido", filetypes=[("Excel Files", "*.xlsx")])
     if not filepath: return
 
     try:
         filename = os.path.basename(filepath)
+        output_dir = os.path.dirname(filepath) # Guardaremos el nuevo TXT en la misma carpeta
+        
         partes = filename.split("_")
         if len(partes) < 3:
             print("❌ ERROR: El nombre del archivo no tiene el formato original.")
             return
+            
         rfc = partes[2]
         print(f"\n🧠 Leyendo correcciones para la empresa: {rfc}...")
 
-        df_polizas = pd.read_excel(filepath, sheet_name="POLIZAS_CONTPAQI")
-        df_gastos = df_polizas[~df_polizas["Concepto"].isin(["IVA 16%", "Acreedor/Banco"])]
+        xls = pd.ExcelFile(filepath)
+        sheet_to_use = "POLIZAS_CONTPAQI" if "POLIZAS_CONTPAQI" in xls.sheet_names else xls.sheet_names[0]
+        df_polizas = pd.read_excel(xls, sheet_name=sheet_to_use)
+        
+        # 1. ENTRENAR A LA IA CON LOS GASTOS
+        df_gastos = df_polizas[~df_polizas["Concepto"].isin(["IVA 16%", "Acreedor/Banco", "IEPS", "IVA pendiente", "IVA acreditable", "IVA acreditable pagado", "IVA Cobrado", "IVA Pdte Cobro"])]
 
         count = 0
         for _, r in df_gastos.iterrows():
-            uuid = str(r["UUID"]).strip()
-            cuenta = str(r["Cuenta"]).strip()
-            upsert_etiqueta(rfc, uuid, cuenta, "") 
-            count += 1
+            uuid = str(r.get("UUID", "")).strip()
+            cuenta = str(r.get("Cuenta", "")).strip()
+            if uuid and uuid != "nan":
+                upsert_etiqueta(rfc, uuid, cuenta, "") 
+                count += 1
 
-        print("⚙️ Re-entrenando la Inteligencia artificial...")
         train_data = get_training_data(rfc)
-        if train_data is not None and len(train_data) > 1:
-            train(train_data)
-            
-        print(f"✅ ¡Aprendizaje Completado! La IA memorizó {count} cuentas para el RFC {rfc}.")
+        if train_data is not None and len(train_data) > 1: train(train_data)
+        print(f"✅ ¡IA actualizada! Memorizó {count} cuentas.")
+        
+        # 2. LA MAGIA: REGENERAR EL ARCHIVO TXT CON LAS CORRECCIONES
+        print(f"🔄 Regenerando archivo TXT para CONTPAQi con los nuevos cambios...")
+        
+        # Pandas lee las fechas a veces con formato largo (YYYY-MM-DD HH:MM:SS), lo limpiamos:
+        df_polizas["Fecha"] = df_polizas["Fecha"].astype(str).str[:10] 
+        
+        # Generamos el nuevo TXT que aplastará al viejo y erróneo
+        txt_path = exportar_txt_contpaqi(df_polizas, output_dir, filename)
+        
+        print(f"✅ ¡NUEVO TXT LISTO! Archivo actualizado exitosamente.")
+        
+        # Mensaje de éxito en la interfaz
+        messagebox.showinfo("Éxito", f"1. La IA memorizó {count} cuentas.\n2. El archivo TXT fue regenerado con tus correcciones.\n\n¡Ya puedes importarlo a CONTPAQi!")
+        
     except Exception as e:
-        print(f"❌ Error leyendo el Excel: {e}")
+        print(f"❌ Error procesando el Excel: {e}")
 
 def select_folder_and_run(tipo):
     settings = load_settings()

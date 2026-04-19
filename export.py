@@ -1,181 +1,211 @@
-# export.py
 import pandas as pd
 import os
 from config import load_settings, cargar_catalogo
 
-def generar_polizas(df):
+def generar_polizas(df, is_egresos):
     settings = load_settings()
-    cuentas_def = settings.get("cuentas_default", {})
+    cuentas = settings.get("cuentas_default", {})
     
-    # Cuentas dinámicas desde settings.json (¡Cero hardcoding!)
-    c_banco = cuentas_def.get("bancos", "FALTA_CUENTA_BANCO")
-    c_iva_pagado = cuentas_def.get("iva_acreditable", "FALTA_CUENTA_IVA")
-    c_iva_pdte_pago = cuentas_def.get("iva_pdte_pago", "FALTA_CUENTA_IVA_PDTE")
-    c_proveedores = cuentas_def.get("proveedores", "FALTA_CUENTA_PROV")
-    c_clientes = cuentas_def.get("clientes", "FALTA_CUENTA_CLI")
-    c_ventas = cuentas_def.get("ventas", "FALTA_CUENTA_VENTAS")
-    c_iva_cobrado = cuentas_def.get("iva_trasladado", "FALTA_IVA_TRASLADADO")
-    c_iva_pdte_cobro = cuentas_def.get("iva_pdte_cobro", "FALTA_IVA_PDTE_COBRO")
+    c_banco = cuentas.get("bancos", "10201000")
+    c_iva_pagado = cuentas.get("iva_acreditable", "11801000")
+    c_iva_pdte_pago = cuentas.get("iva_pdte_pago", "11901000") 
+    c_proveedores = cuentas.get("proveedores", "20101000")
+    c_clientes = cuentas.get("clientes", "10501000")
+    c_ventas = cuentas.get("ventas", "40101000")
+    c_iva_cobrado = cuentas.get("iva_trasladado", "20801000")
+    c_iva_pdte_cobro = cuentas.get("iva_pdte_cobro", "20901000")
     
     pol = []
     num = 1
     df = df.fillna(0)
 
-    # --- 1. FACTURAS NORMALES (I, E) ---
-    facturas = df[df['tipo'].isin(['I', 'E'])]
-    
-    for _, r in facturas.iterrows():
-        concepto_recortado = str(r["concepto"])[:50]
-        cuenta_asignada = str(r.get("cuenta", "")).strip()
-        c_gasto_ingreso = cuenta_asignada if cuenta_asignada and cuenta_asignada != "0" else "PENDIENTE"
+    for _, r in df.iterrows():
+        tipo = r["tipo"]
+        rol = "purchase" if is_egresos else "sale"
+        metodo = r.get("metodo_pago", "PUE")
+        uuid = str(r["uuid"]).strip()
+        concepto = str(r["concepto"])[:50]
         
-        total = float(r["total"])
-        iva_16 = float(r["iva_16"])
-        iva_8 = float(r["iva_8"])
-        ret_iva = float(r["ret_iva"])
-        ret_isr = float(r["ret_isr"])
-        monto_ajustado = round(total - iva_16 - iva_8 + ret_iva + ret_isr, 2)
+        # Extraemos la fecha limpia (YYYY-MM-DD)
+        fecha_limpia = str(r.get("fecha", "2026-01-01")).split("T")[0]
         
-        if r["tipo"] == "E":
-            if r.get("metodo_pago", "PUE") == "PPD":
-                pol.append([num, "Diario", c_gasto_ingreso, monto_ajustado, 0, concepto_recortado, r["uuid"]])
-                if iva_16 > 0: pol.append([num, "Diario", c_iva_pdte_pago, iva_16, 0, "IVA Pdte Pago", r["uuid"]])
-                pol.append([num, "Diario", c_proveedores, 0, total, str(r["nombre_emisor"])[:50], r["uuid"]])
-            else: 
-                pol.append([num, "Egreso", c_gasto_ingreso, monto_ajustado, 0, concepto_recortado, r["uuid"]])
-                if iva_16 > 0: pol.append([num, "Egreso", c_iva_pagado, iva_16, 0, "IVA Acreditable", r["uuid"]])
-                pol.append([num, "Egreso", c_banco, 0, total, str(r["nombre_emisor"])[:50], r["uuid"]])
+        c_asignada = str(r.get("cuenta", "PENDIENTE")).strip()
+        c_principal = c_asignada if c_asignada not in ["", "0", "PENDIENTE"] else "PENDIENTE"
+        
+        tot = float(r["total"])
+        iva = float(r["iva_16"]) + float(r["iva_8"])
+        ret = float(r["ret_iva"]) + float(r["ret_isr"])
+        neto = round(tot - iva + ret, 2)
+        
+        # 1. TIPO "I" (INGRESOS NORMALES)
+        if tipo == "I":
+            if rol == "purchase":
+                prov = str(r["nombre_emisor"])[:50]
+                if metodo == "PPD":
+                    pol.append([num, "Diario", fecha_limpia, c_principal, neto, 0, concepto, uuid])
+                    if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_pago, iva, 0, "IVA pendiente", uuid])
+                    pol.append([num, "Diario", fecha_limpia, c_proveedores, 0, tot, prov, uuid])
+                else:
+                    pol.append([num, "Egreso", fecha_limpia, c_principal, neto, 0, concepto, uuid])
+                    if iva > 0: pol.append([num, "Egreso", fecha_limpia, c_iva_pagado, iva, 0, "IVA acreditable", uuid])
+                    pol.append([num, "Egreso", fecha_limpia, c_banco, 0, tot, prov, uuid])
+            else:
+                cli = str(r["nombre_receptor"])[:50]
+                c_principal = c_principal if c_principal != "PENDIENTE" else c_ventas
+                if metodo == "PPD":
+                    pol.append([num, "Diario", fecha_limpia, c_clientes, tot, 0, cli, uuid])
+                    pol.append([num, "Diario", fecha_limpia, c_principal, 0, neto, concepto, uuid])
+                    if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_cobro, 0, iva, "IVA Pdte Cobro", uuid])
+                else:
+                    pol.append([num, "Ingreso", fecha_limpia, c_banco, tot, 0, cli, uuid])
+                    pol.append([num, "Ingreso", fecha_limpia, c_principal, 0, neto, concepto, uuid])
+                    if iva > 0: pol.append([num, "Ingreso", fecha_limpia, c_iva_cobrado, 0, iva, "IVA Cobrado", uuid])
 
-        elif r["tipo"] == "I":
-            c_gasto_ingreso = c_gasto_ingreso if c_gasto_ingreso != "PENDIENTE" else c_ventas 
-            if r.get("metodo_pago", "PUE") == "PPD":
-                pol.append([num, "Diario", c_clientes, total, 0, str(r["nombre_receptor"])[:50], r["uuid"]])
-                pol.append([num, "Diario", c_gasto_ingreso, 0, monto_ajustado, concepto_recortado, r["uuid"]])
-                if iva_16 > 0: pol.append([num, "Diario", c_iva_pdte_cobro, 0, iva_16, "IVA Pdte Cobro", r["uuid"]])
-            else: 
-                pol.append([num, "Ingreso", c_banco, total, 0, str(r["nombre_receptor"])[:50], r["uuid"]])
-                pol.append([num, "Ingreso", c_gasto_ingreso, 0, monto_ajustado, concepto_recortado, r["uuid"]])
-                if iva_16 > 0: pol.append([num, "Ingreso", c_iva_cobrado, 0, iva_16, "IVA Cobrado", r["uuid"]])
+        # 2. TIPO "E" (EGRESOS / NOTAS DE CRÉDITO)
+        elif tipo == "E":
+            if rol == "purchase":
+                prov = str(r["nombre_emisor"])[:50]
+                pol.append([num, "Diario", fecha_limpia, c_proveedores, tot, 0, f"NC Prov - {prov}", uuid])
+                pol.append([num, "Diario", fecha_limpia, c_principal, 0, neto, concepto, uuid])
+                if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_pago, 0, iva, "Reversión IVA Pdte", uuid])
+            else:
+                cli = str(r["nombre_receptor"])[:50]
+                c_principal = c_principal if c_principal != "PENDIENTE" else c_ventas
+                pol.append([num, "Diario", fecha_limpia, c_principal, neto, 0, concepto, uuid])
+                if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_cobro, iva, 0, "Reversión IVA Pdte", uuid])
+                pol.append([num, "Diario", fecha_limpia, c_clientes, 0, tot, f"NC Cli - {cli}", uuid])
+
+        # 3. TIPO "P" (PAGOS / REPs)
+        elif tipo == "P":
+            if rol == "purchase":
+                pol.append([num, "Egreso", fecha_limpia, c_proveedores, tot, 0, concepto, uuid])
+                pol.append([num, "Egreso", fecha_limpia, c_banco, 0, tot, "Salida a Proveedor", uuid])
+                if iva > 0:
+                    pol.append([num, "Egreso", fecha_limpia, c_iva_pagado, iva, 0, "Reclasifica IVA Acred", uuid])
+                    pol.append([num, "Egreso", fecha_limpia, c_iva_pdte_pago, 0, iva, "Mata IVA Pdte", uuid])
+            else:
+                pol.append([num, "Ingreso", fecha_limpia, c_banco, tot, 0, "Entrada de Cliente", uuid])
+                pol.append([num, "Ingreso", fecha_limpia, c_clientes, 0, tot, concepto, uuid])
+                if iva > 0:
+                    pol.append([num, "Ingreso", fecha_limpia, c_iva_pdte_cobro, iva, 0, "Mata IVA Pdte Cobro", uuid])
+                    pol.append([num, "Ingreso", fecha_limpia, c_iva_cobrado, 0, iva, "Reclasifica IVA Cobrado", uuid])
+
+        # 4. TIPO "N" (NÓMINAS)
+        elif tipo == "N":
+            c_nom = cuentas.get("nomina", "60010000")
+            c_ret_isr = cuentas.get("retencion_isr", "21601000")
+            pol.append([num, "Diario", fecha_limpia, c_nom, float(r["subtotal"]), 0, f"Provisión Nómina {r['departamento']}"[:50], ""])
+            if float(r["ret_isr"]) > 0: 
+                pol.append([num, "Diario", fecha_limpia, c_ret_isr, 0, float(r["ret_isr"]), "Ret ISR Nomina", ""])
+            pol.append([num, "Diario", fecha_limpia, c_banco, 0, tot, "Neto a Pagar", ""])
+            
         num += 1
 
-    # --- 2. NÓMINAS AGRUPADAS (N) ---
-    nominas = df[df['tipo'] == 'N']
-    if not nominas.empty:
-        c_nomina = cuentas_def.get("nomina", "FALTA_CUENTA_NOMINA")
-        c_impuestos_ret = cuentas_def.get("retenciones", "FALTA_CUENTA_RETENCIONES")
-        
-        for depto, grupo in nominas.groupby('departamento'):
-            total_sueldos = float(grupo['subtotal'].sum())
-            total_neto = float(grupo['total'].sum())
-            total_ret_isr = float(grupo['ret_isr'].sum())
-            
-            pol.append([num, "Diario", c_nomina, total_sueldos, 0, f"Provisión Nómina {depto}"[:50], ""])
-            if total_ret_isr > 0:
-                pol.append([num, "Diario", c_impuestos_ret, 0, total_ret_isr, f"Ret ISR Nomina {depto}", ""])
-            pol.append([num, "Diario", c_banco, 0, total_neto, f"Neto a Pagar {depto}", ""])
-            num += 1
+    return pd.DataFrame(pol, columns=["Numero", "Tipo", "Fecha", "Cuenta", "Debe", "Haber", "Concepto", "UUID"])
 
-    # --- 3. PAGOS / REP (P) ---
-    pagos = df[df['tipo'] == 'P']
-    if not pagos.empty:
-        for _, r in pagos.iterrows():
-            total = float(r["total"])
-            iva_16 = float(r["iva_16"])
-            concepto = f"Pago a Proveedor REP - {str(r['nombre_emisor'])[:30]}"
-            
-            pol.append([num, "Egreso", c_proveedores, total, 0, concepto, r["uuid"]])
-            if iva_16 > 0:
-                pol.append([num, "Egreso", c_iva_pagado, iva_16, 0, "Traspaso IVA Pagado", r["uuid"]])
-                pol.append([num, "Egreso", c_iva_pdte_pago, 0, iva_16, "Cance. IVA Pdte", r["uuid"]])
-            pol.append([num, "Egreso", c_banco, 0, total, "Pago desde Banco", r["uuid"]])
-            num += 1
-
-    return pd.DataFrame(pol, columns=["Numero", "Tipo", "Cuenta", "Debe", "Haber", "Concepto", "UUID"])
-
-def generar_sugerencia_dinamica(row, df_catalogo):
-    """Sugerencia inteligente leyendo tu catálogo real (Cuentas.txt)"""
-    cuenta_actual = str(row.get("cuenta", "")).strip()
-    
-    if cuenta_actual and cuenta_actual not in ["0", "PENDIENTE"]:
-        return "🧠 Asignado por IA"
-
-    if df_catalogo is None or df_catalogo.empty:
-        return "⚠️ Carga tu catálogo para ver sugerencias"
-
-    nombre_emisor = str(row.get("nombre_emisor", "")).upper()
-    palabras_basura = ['S.A.', 'DE', 'C.V.', 'SAB', 'RL', 'SA', 'CV', 'S', 'A', 'C', 'V']
-    palabras = [p for p in nombre_emisor.split() if p not in palabras_basura and len(p) > 2]
-    
-    if not palabras:
-        return "Requiere Clasificación Manual"
-        
-    palabra_clave = palabras[0]
-
+def generar_sugerencia(row, df_cat):
+    c_act = str(row.get("cuenta", "")).strip()
+    if c_act and c_act not in ["0", "PENDIENTE"]: return "🧠 IA"
+    if df_cat is None or df_cat.empty: return "⚠️ Faltan Cuentas"
+    emisor = str(row.get("nombre_emisor", "")).upper()
+    basura = ['S.A.', 'DE', 'C.V.', 'SAB', 'RL', 'SA', 'CV', 'S', 'A', 'C', 'V']
+    pals = [p for p in emisor.split() if p not in basura and len(p) > 2]
+    if not pals: return "Manual"
     try:
-        coincidencias = df_catalogo[df_catalogo.iloc[:, 1].str.upper().str.contains(palabra_clave, na=False)]
-        if not coincidencias.empty:
-            cuenta_sug = coincidencias.iloc[0, 0] 
-            nombre_sug = coincidencias.iloc[0, 1] 
-            return f"💡 Encontrado en Catálogo: {cuenta_sug} ({nombre_sug})"
-    except Exception:
-        pass
-        
-    return "Requiere Clasificación Manual"
+        match = df_cat[df_cat.iloc[:, 1].str.upper().str.contains(pals[0], na=False)]
+        if not match.empty: return f"💡 {match.iloc[0, 0]} ({match.iloc[0, 1]})"
+    except Exception: pass
+    return "Manual"
 
-def auto_ajustar_columnas_openpyxl(writer, sheet_name, df):
+def auto_ajustar_columnas(writer, sheet_name, df):
     worksheet = writer.sheets[sheet_name]
     for i, col in enumerate(df.columns):
         max_len = max(df[col].astype(str).map(len).max(), len(str(col))) + 2
-        max_len = min(max_len, 50) 
-        from openpyxl.utils import get_column_letter
-        col_letter = get_column_letter(i + 1)
-        worksheet.column_dimensions[col_letter].width = max_len
+        worksheet.column_dimensions[__import__('openpyxl').utils.get_column_letter(i + 1)].width = min(max_len, 50)
 
-# ¡NOTA: Se regresó a 5 parámetros para que sea 100% compatible con tu main.py actual!
+def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
+    """Genera el archivo TXT nativo para Carga Batch en CONTPAQi."""
+    txt_filename = excel_filename.replace(".xlsx", ".txt")
+    filepath = os.path.join(output_dir, txt_filename)
+    
+    # CONTPAQi usa la codificación windows-1252 (ANSI) para los acentos en México
+    with open(filepath, "w", encoding="windows-1252", errors="replace") as f:
+        for num, group in polizas_df.groupby("Numero"):
+            primera_fila = group.iloc[0]
+            
+            # Formato de Fecha YYYYMMDD
+            fecha_str = str(primera_fila["Fecha"]).replace("-", "")
+            if len(fecha_str) != 8: fecha_str = "20260101"
+            
+            # Diccionario de Tipos de Póliza en CONTPAQi: 1=Ingreso, 2=Egreso, 3=Diario
+            tipo_str = str(primera_fila["Tipo"]).upper()
+            tipo_int = "3" 
+            if "INGRESO" in tipo_str: tipo_int = "1"
+            elif "EGRESO" in tipo_str: tipo_int = "2"
+            
+            concepto_poliza = str(primera_fila["Concepto"])[:100]
+            
+            # ENCABEZADO DE PÓLIZA: P  Fecha  Tipo  Numero  1  0  Concepto
+            f.write(f"P {fecha_str} {tipo_int} {num} 1 0 {concepto_poliza}\n")
+            
+            # MOVIMIENTOS
+            for _, r in group.iterrows():
+                cuenta = str(r["Cuenta"]).replace("-", "")
+                if cuenta == "PENDIENTE": continue # Evitamos crashear CONTPAQi
+                
+                debe = float(r["Debe"])
+                haber = float(r["Haber"])
+                concepto_mov = str(r["Concepto"])[:100]
+                uuid = str(r["UUID"]).strip()
+                
+                tipo_mov = "0" if debe > 0 else "1"
+                importe = debe if debe > 0 else haber
+                
+                if importe == 0: continue # No mandamos líneas en cero
+                
+                # MOVIMIENTO: M  Cuenta  Referencia  TipoMov  Importe  0  0  Concepto
+                f.write(f"M {cuenta}  {tipo_mov} {importe:.2f} 0 0 {concepto_mov}\n")
+                
+                # ASOCIAR UUID: AD  UUID
+                if uuid and uuid != "nan" and len(uuid) == 36:
+                    f.write(f"AD {uuid}\n")
+                    
+    return filepath
+
 def exportar(df, diot_df, output_dir, filename, log_data):
     filepath = os.path.join(output_dir, filename)
-    
-    # Carga el catálogo internamente sin molestar a main.py
-    df_catalogo = cargar_catalogo()
-    
-    resumen_df = pd.DataFrame([
-        {"Métrica": "Total de XMLs Analizados", "Cantidad": log_data.get("total", 0)},
-        {"Métrica": "Facturas Procesadas (PUE/PPD)", "Cantidad": log_data.get("validas", 0)},
-        {"Métrica": "Nóminas Agrupadas (Sin UUID)", "Cantidad": log_data.get("nominas", 0)},
-        {"Métrica": "CFDI de Pagos (REPs) Procesados", "Cantidad": log_data.get("pagos", 0)},
-        {"Métrica": "CFDI Cancelados (Revisar)", "Cantidad": log_data.get("cancelados", 0)},
-        {"Métrica": "⚠️ RECORDATORIO", "Cantidad": "SUBE LOS XML AL ADD ANTES DE IMPORTAR"}
-    ])
+    is_egresos = "EGRESOS" in filename.upper()
+    try: df_catalogo = cargar_catalogo()
+    except: df_catalogo = None
 
-    df["Sugerencia_Catálogo"] = df.apply(lambda row: generar_sugerencia_dinamica(row, df_catalogo), axis=1)
+    res_df = pd.DataFrame([{"Métrica": k, "Cantidad": v} for k, v in log_data.items()])
+    df["Sugerencia"] = df.apply(lambda r: generar_sugerencia(r, df_catalogo), axis=1)
 
+    # 1. Generamos el DataFrame maestro de pólizas
+    polizas_df = generar_polizas(df, is_egresos)
+
+    # 2. Generamos el Excel para tu revisión/entrenamiento
     with pd.ExcelWriter(filepath, engine='openpyxl') as w:
-        resumen_df.to_excel(w, sheet_name="RESUMEN_LOG", index=False)
-        auto_ajustar_columnas_openpyxl(w, "RESUMEN_LOG", resumen_df)
-
-        df.to_excel(w, sheet_name="FACTURAS_BASE", index=False)
-        auto_ajustar_columnas_openpyxl(w, "FACTURAS_BASE", df)
-
-        polizas_df = generar_polizas(df)
+        res_df.to_excel(w, sheet_name="RESUMEN", index=False)
+        auto_ajustar_columnas(w, "RESUMEN", res_df)
+        
+        df.to_excel(w, sheet_name="BASE", index=False)
+        auto_ajustar_columnas(w, "BASE", df)
+        
         polizas_df.to_excel(w, sheet_name="POLIZAS_CONTPAQI", index=False)
-        auto_ajustar_columnas_openpyxl(w, "POLIZAS_CONTPAQI", polizas_df)
+        auto_ajustar_columnas(w, "POLIZAS_CONTPAQI", polizas_df)
         
         if diot_df is not None and not diot_df.empty:
-            diot_df.to_excel(w, sheet_name="DIOT_LISTA", index=False)
-            auto_ajustar_columnas_openpyxl(w, "DIOT_LISTA", diot_df)
+            diot_df.to_excel(w, sheet_name="DIOT", index=False)
+            auto_ajustar_columnas(w, "DIOT", diot_df)
             
-    # --- MENSAJE DE ÉXITO Y APERTURA DE CARPETA AUTOMÁTICA ---
-    print("\n" + "="*50)
-    print("✅ ¡PROCESO FINALIZADO CON ÉXITO!")
-    print(f"📁 Excel generado en: {output_dir.replace(chr(92), '/')}")
-    print(f"📄 Nombre: {filename}")
-    print("="*50 + "\n")
-    
+    # 3. GENERAMOS EL TXT NATIVO DE CONTPAQI
+    exportar_txt_contpaqi(polizas_df, output_dir, filename)
+
     try:
-        # Esto abre mágicamente la carpeta en Windows al terminar
-        if os.name == 'nt':
-            os.startfile(output_dir)
-    except Exception:
-        pass
-        
+        import sys
+        if os.name == 'nt': os.startfile(output_dir)
+        elif sys.platform == 'darwin': __import__('subprocess').call(["open", output_dir])
+    except Exception: pass
+
     return filepath

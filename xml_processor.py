@@ -2,62 +2,97 @@ import os
 import zipfile
 import xml.etree.ElementTree as ET
 
-NS = {
-    'cfdi': 'http://www.sat.gob.mx/cfd/4',
-    'tfd': 'http://www.sat.gob.mx/TimbreFiscalDigital'
-}
-
 def parse_xml(source):
     tree = ET.parse(source)
     root = tree.getroot()
 
+    ns_cfdi = root.tag.split('}')[0] + '}' if '}' in root.tag else ''
+    
     tipo = root.attrib.get("TipoDeComprobante", "")
     total = float(root.attrib.get("Total", 0))
     subtotal = float(root.attrib.get("SubTotal", 0))
     cp = root.attrib.get("LugarExpedicion", "")
+    metodo_pago = root.attrib.get("MetodoPago", "")
 
-    em = root.find('cfdi:Emisor', NS)
-    re = root.find('cfdi:Receptor', NS)
+    em = root.find(f'{ns_cfdi}Emisor')
+    re = root.find(f'{ns_cfdi}Receptor')
     rfc_emisor = em.attrib.get("Rfc", "") if em is not None else ""
     rfc_receptor = re.attrib.get("Rfc", "") if re is not None else ""
     
-    tfd = root.find('.//tfd:TimbreFiscalDigital', NS)
-    uuid = tfd.attrib.get("UUID") if tfd is not None else None
+    uuid = None
+    for elem in root.iter():
+        if elem.tag.endswith('TimbreFiscalDigital'):
+            uuid = elem.attrib.get("UUID")
+            break
 
     concepto = ""
-    c = root.find('cfdi:Conceptos/cfdi:Concepto', NS)
+    c = root.find(f'{ns_cfdi}Conceptos/{ns_cfdi}Concepto')
     if c is not None:
         concepto = c.attrib.get("Descripcion", "")
 
-    iva_16, iva_8, iva_exento = 0.0, 0.0, 0.0
+    departamento = "General"
+    iva_16, iva_8, iva_exento, ieps = 0.0, 0.0, 0.0, 0.0
     ret_iva, ret_isr = 0.0, 0.0
+    monto_pago_rep = 0.0
+    doctos_relacionados = []
 
-    for t in root.findall('.//cfdi:Impuestos/cfdi:Traslados/cfdi:Traslado', NS):
-        if t.attrib.get("Impuesto") == "002": 
-            tasa = t.attrib.get("TasaOCuota", "0")
+    # 1. Extraer impuestos del nodo global (Aplica a Ingresos y Egresos normales)
+    nodo_impuestos_global = root.find(f'./{ns_cfdi}Impuestos')
+    if nodo_impuestos_global is not None:
+        for t in nodo_impuestos_global.findall(f'.//{ns_cfdi}Traslado'):
+            impuesto = t.attrib.get("Impuesto")
             importe = float(t.attrib.get("Importe", 0))
-            if tasa == "0.160000":
-                iva_16 += importe
-            elif tasa == "0.080000":
-                iva_8 += importe
-            elif t.attrib.get("TipoFactor") == "Exento":
-                iva_exento += float(t.attrib.get("Base", 0)) 
+            if impuesto == "002":
+                tasa = t.attrib.get("TasaOCuota", "0")
+                if tasa == "0.160000": iva_16 += importe
+                elif tasa == "0.080000": iva_8 += importe
+            elif impuesto == "003":
+                ieps += importe
+                
+        for r in nodo_impuestos_global.findall(f'.//{ns_cfdi}Retencion'):
+            impuesto = r.attrib.get("Impuesto")
+            importe = float(r.attrib.get("Importe", 0))
+            if impuesto == "001": ret_isr += importe
+            elif impuesto == "002": ret_iva += importe
 
-    for r in root.findall('.//cfdi:Impuestos/cfdi:Retenciones/cfdi:Retencion', NS):
-        impuesto = r.attrib.get("Impuesto")
-        importe = float(r.attrib.get("Importe", 0))
-        if impuesto == "001": 
-            ret_isr += importe
-        elif impuesto == "002": 
-            ret_iva += importe
+    # 2. Extraer datos específicos (REPs y Nóminas)
+    for elem in root.iter():
+        tag = elem.tag.split('}')[-1]
+        
+        if tag == 'Receptor' and tipo == 'N':
+            departamento = elem.attrib.get("Departamento", "General")
+            
+        elif tag == 'Pago':
+            monto_pago_rep += float(elem.attrib.get("Monto", 0))
+            metodo_pago = "PPD"
+            
+        elif tag == 'DoctoRelacionado':
+            doc_id = elem.attrib.get("IdDocumento")
+            if doc_id: doctos_relacionados.append(doc_id)
+            
+        # BUGFIX: En CFDI 4.0 el REP trae TrasladoP (Total del pago) y TrasladoDR (Por documento).
+        # Para evitar duplicar impuestos, leemos ESTRICTAMENTE el TrasladoP.
+        elif tag == 'TrasladoP':
+            if elem.attrib.get("ImpuestoP") == "002":
+                tasa = elem.attrib.get("TasaOCuotaP", "0")
+                if tasa == "0.160000":
+                    iva_16 += float(elem.attrib.get("ImporteP", 0))
+
+    # Si es tipo "P", el total se saca del nodo del pago
+    if tipo == "P":
+        total = monto_pago_rep
+        concepto = f"Pago a UUID: {doctos_relacionados[0][:8]}..." if doctos_relacionados else "REP de Pago"
+    elif not metodo_pago:
+        metodo_pago = "PUE" 
 
     return {
         "uuid": uuid, "tipo": tipo, "fecha": root.attrib.get("Fecha"),
+        "metodo_pago": metodo_pago, "departamento": departamento, 
         "rfc_emisor": rfc_emisor, "rfc_receptor": rfc_receptor,
         "nombre_emisor": em.attrib.get("Nombre", "") if em is not None else "",
-        "nombre_receptor": re.attrib.get("Nombre", "") if re is not None else "", # <--- ¡LA SOLUCIÓN AL KEYERROR!
+        "nombre_receptor": re.attrib.get("Nombre", "") if re is not None else "",
         "concepto": concepto, "subtotal": subtotal, "total": total, "cp": cp,
-        "iva_16": iva_16, "iva_8": iva_8, "iva_exento": iva_exento,
+        "iva_16": iva_16, "iva_8": iva_8, "iva_exento": iva_exento, "ieps": ieps,
         "ret_iva": ret_iva, "ret_isr": ret_isr
     }
 
@@ -65,31 +100,18 @@ def load_folder(folder):
     rows = []
     for f in os.listdir(folder):
         full_path = os.path.join(folder, f)
-        
         if f.lower().endswith(".xml"):
-            try:
-                rows.append(parse_xml(full_path))
-            except Exception as e:
-                print(f"❌ Error parseando {f}: {e}")
-                
+            try: rows.append(parse_xml(full_path))
+            except Exception: pass
         elif f.lower().endswith(".zip"):
-            print(f"📦 Extrayendo facturas de {f}...")
             try:
                 with zipfile.ZipFile(full_path, 'r') as z:
                     for xml_name in z.namelist():
                         if xml_name.lower().endswith(".xml"):
                             with z.open(xml_name) as xml_file:
-                                try:
-                                    rows.append(parse_xml(xml_file))
-                                except Exception as e:
-                                    print(f"❌ Error leyendo XML dentro de ZIP {xml_name}: {e}")
-            except Exception as e:
-                print(f"❌ Error al abrir el ZIP {f}: {e}")
-                
+                                try: rows.append(parse_xml(xml_file))
+                                except Exception: pass
+            except Exception: pass
     return rows
 
-def es_pago(tipo):
-    """
-    Regla simple: Si el atributo TipoDeComprobante es 'P', es un CFDI de Pago.
-    """
-    return tipo == "P"
+def es_pago(tipo): return tipo == "P"

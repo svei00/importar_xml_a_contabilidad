@@ -14,10 +14,10 @@ def parse_xml(source):
     cp = root.attrib.get("LugarExpedicion", "")
     metodo_pago = root.attrib.get("MetodoPago", "")
     
-    # EXTRAER SERIE Y FOLIO PARA LA REFERENCIA
+    # NUEVO: Referencia base con guion (Ej. F-1234)
     serie = root.attrib.get("Serie", "")
     folio = root.attrib.get("Folio", "")
-    referencia_xml = f"{serie}{folio}".strip()
+    referencia_xml = f"{serie}-{folio}".strip("-")
 
     em = root.find(f'{ns_cfdi}Emisor')
     re = root.find(f'{ns_cfdi}Receptor')
@@ -82,15 +82,10 @@ def parse_xml(source):
     if tipo == "P":
         total = monto_pago_rep
         concepto = f"Pago a UUID: {doctos_relacionados[0][:8]}..." if doctos_relacionados else "REP de Pago"
-        # Si es un pago, la referencia es el UUID al que está pagando
         referencia_xml = doctos_relacionados[0][:8] if doctos_relacionados else "REP"
     elif not metodo_pago:
         metodo_pago = "PUE" 
         
-    # Si la factura no tiene serie ni folio, usamos el nombre del emisor/receptor como referencia
-    if not referencia_xml:
-        referencia_xml = em.attrib.get("Nombre", "S/R") if tipo in ["I", "E", "P"] else "NOMINA"
-
     return {
         "uuid": uuid, "tipo": tipo, "fecha": root.attrib.get("Fecha"),
         "metodo_pago": metodo_pago, "departamento": departamento, 
@@ -99,7 +94,7 @@ def parse_xml(source):
         "nombre_receptor": re.attrib.get("Nombre", "") if re is not None else "",
         "concepto": concepto, "subtotal": subtotal, "total": total, "cp": cp,
         "iva_16": iva_16, "iva_8": iva_8, "iva_exento": iva_exento, "ieps": ieps,
-        "ret_iva": ret_iva, "ret_isr": ret_isr, "referencia": referencia_xml # <-- Se pasa la referencia
+        "ret_iva": ret_iva, "ret_isr": ret_isr, "referencia": referencia_xml
     }
 
 def load_folder(folder):

@@ -26,21 +26,31 @@ def generar_polizas(df, is_egresos):
         uuid = str(r["uuid"]).strip()
         concepto = str(r["concepto"])[:50]
         
-        # OBTENEMOS LA REFERENCIA (Serie+Folio, VIN, o Nombre de Proveedor)
-        ref = str(r.get("referencia", "SR"))[:20] 
+        # LOGICA MAESTRA DE REFERENCIA (30 CARACTERES)
+        ref_base = str(r.get("referencia", "")).strip()
+        if not ref_base or ref_base == "nan": ref_base = "SR"
         
-        # Extraemos la fecha limpia (YYYY-MM-DD)
+        nombre_tercero = str(r.get("nombre_emisor", "")) if is_egresos else str(r.get("nombre_receptor", ""))
+        if nombre_tercero.lower() == "nan": nombre_tercero = ""
+        
+       # Concatenamos Nombre + Serie-Folio para mejor ordenamiento en Auxiliares
+        if nombre_tercero:
+            espacio_nombre = 30 - len(ref_base) - 1 # Espacio que sobra para el nombre
+            nombre_corto = nombre_tercero[:espacio_nombre].strip()
+            ref = f"{nombre_corto}_{ref_base}" if ref_base else nombre_corto
+        else:
+            ref = ref_base[:30]
+        
         fecha_limpia = str(r.get("fecha", "2026-01-01")).split("T")[0]
         
         c_asignada = str(r.get("cuenta", "PENDIENTE")).strip()
-        c_principal = c_asignada if c_asignada not in ["", "0", "PENDIENTE"] else "PENDIENTE"
+        c_principal = c_asignada if c_asignada not in ["", "0", "PENDIENTE", "nan"] else "PENDIENTE"
         
         tot = float(r["total"])
         iva = float(r["iva_16"]) + float(r["iva_8"])
         ret = float(r["ret_iva"]) + float(r["ret_isr"])
         neto = round(tot - iva + ret, 2)
         
-        # 1. TIPO "I" (INGRESOS NORMALES)
         if tipo == "I":
             if rol == "purchase":
                 prov = str(r["nombre_emisor"])[:50]
@@ -64,7 +74,6 @@ def generar_polizas(df, is_egresos):
                     pol.append([num, "Ingreso", fecha_limpia, c_principal, ref, 0, neto, concepto, uuid])
                     if iva > 0: pol.append([num, "Ingreso", fecha_limpia, c_iva_cobrado, ref, 0, iva, "IVA Cobrado", uuid])
 
-        # 2. TIPO "E" (EGRESOS / NOTAS DE CRÉDITO)
         elif tipo == "E":
             if rol == "purchase":
                 prov = str(r["nombre_emisor"])[:50]
@@ -78,7 +87,6 @@ def generar_polizas(df, is_egresos):
                 if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_cobro, ref, iva, 0, "Reversión IVA Pdte", uuid])
                 pol.append([num, "Diario", fecha_limpia, c_clientes, ref, 0, tot, f"NC Cli - {cli}", uuid])
 
-        # 3. TIPO "P" (PAGOS / REPs)
         elif tipo == "P":
             if rol == "purchase":
                 pol.append([num, "Egreso", fecha_limpia, c_proveedores, ref, tot, 0, concepto, uuid])
@@ -93,7 +101,6 @@ def generar_polizas(df, is_egresos):
                     pol.append([num, "Ingreso", fecha_limpia, c_iva_pdte_cobro, ref, iva, 0, "Mata IVA Pdte Cobro", uuid])
                     pol.append([num, "Ingreso", fecha_limpia, c_iva_cobrado, ref, 0, iva, "Reclasifica IVA Cobrado", uuid])
 
-        # 4. TIPO "N" (NÓMINAS)
         elif tipo == "N":
             c_nom = cuentas.get("nomina", "60010000")
             c_ret_isr = cuentas.get("retencion_isr", "21601000")
@@ -104,12 +111,11 @@ def generar_polizas(df, is_egresos):
             
         num += 1
 
-    # Agregamos la columna "Referencia" al Dataframe
     return pd.DataFrame(pol, columns=["Numero", "Tipo", "Fecha", "Cuenta", "Referencia", "Debe", "Haber", "Concepto", "UUID"])
 
 def generar_sugerencia(row, df_cat):
     c_act = str(row.get("cuenta", "")).strip()
-    if c_act and c_act not in ["0", "PENDIENTE"]: return "🧠 IA"
+    if c_act and c_act not in ["0", "PENDIENTE", "nan"]: return "🧠 IA"
     if df_cat is None or df_cat.empty: return "⚠️ Faltan Cuentas"
     emisor = str(row.get("nombre_emisor", "")).upper()
     basura = ['S.A.', 'DE', 'C.V.', 'SAB', 'RL', 'SA', 'CV', 'S', 'A', 'C', 'V']
@@ -128,7 +134,6 @@ def auto_ajustar_columnas(writer, sheet_name, df):
         worksheet.column_dimensions[__import__('openpyxl').utils.get_column_letter(i + 1)].width = min(max_len, 50)
 
 def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
-    """Genera el archivo TXT nativo para Carga Batch en CONTPAQi."""
     txt_filename = excel_filename.replace(".xlsx", ".txt")
     filepath = os.path.join(output_dir, txt_filename)
     
@@ -146,18 +151,16 @@ def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
             
             concepto_poliza = str(primera_fila["Concepto"])[:100]
             
-            # Encabezado sin el "0" que causaba el crash de Diarios
             f.write(f"P {fecha_str} {tipo_int} {num} 1   {concepto_poliza}\n")
             
             for _, r in group.iterrows():
-                # Conservamos los guiones si existen
                 cuenta = str(r["Cuenta"]).strip()
                 if cuenta == "PENDIENTE" or "FALTA" in cuenta.upper():
                     continue 
                 
-                # INYECTAR LA REFERENCIA: Reemplazamos espacios por guiones bajos para no romper las columnas del TXT
-                referencia = str(r.get("Referencia", "SR")).strip().replace(" ", "_")[:20]
-                if not referencia: referencia = "SR"
+                # LA REFERENCIA CON 30 CARACTERES (Sustituimos espacios para no romper CONTPAQi)
+                referencia = str(r.get("Referencia", "SR")).strip().replace(" ", "_")[:30]
+                if not referencia or referencia == "nan": referencia = "SR"
                 
                 debe = float(r["Debe"])
                 haber = float(r["Haber"])
@@ -169,7 +172,6 @@ def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
                 
                 if importe == 0: continue 
                 
-                # LA NUEVA ESTRUCTURA INCLUYE LA REFERENCIA DESPUÉS DE LA CUENTA
                 f.write(f"M {cuenta} {referencia} {tipo_mov} {importe:.2f} 0 0 {concepto_mov}\n")
                 
                 if uuid and uuid != "nan" and len(uuid) == 36:
@@ -186,10 +188,8 @@ def exportar(df, diot_df, output_dir, filename, log_data):
     res_df = pd.DataFrame([{"Métrica": k, "Cantidad": v} for k, v in log_data.items()])
     df["Sugerencia"] = df.apply(lambda r: generar_sugerencia(r, df_catalogo), axis=1)
 
-    # 1. Generamos el DataFrame maestro de pólizas (Ahora incluye Referencia)
     polizas_df = generar_polizas(df, is_egresos)
 
-    # 2. Generamos el Excel
     with pd.ExcelWriter(filepath, engine='openpyxl') as w:
         res_df.to_excel(w, sheet_name="RESUMEN", index=False)
         auto_ajustar_columnas(w, "RESUMEN", res_df)
@@ -204,7 +204,6 @@ def exportar(df, diot_df, output_dir, filename, log_data):
             diot_df.to_excel(w, sheet_name="DIOT", index=False)
             auto_ajustar_columnas(w, "DIOT", diot_df)
             
-    # 3. GENERAMOS EL TXT NATIVO DE CONTPAQI (Con la nueva Referencia)
     exportar_txt_contpaqi(polizas_df, output_dir, filename)
 
     try:

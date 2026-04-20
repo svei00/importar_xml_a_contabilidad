@@ -26,6 +26,9 @@ def generar_polizas(df, is_egresos):
         uuid = str(r["uuid"]).strip()
         concepto = str(r["concepto"])[:50]
         
+        # OBTENEMOS LA REFERENCIA (Serie+Folio, VIN, o Nombre de Proveedor)
+        ref = str(r.get("referencia", "SR"))[:20] 
+        
         # Extraemos la fecha limpia (YYYY-MM-DD)
         fecha_limpia = str(r.get("fecha", "2026-01-01")).split("T")[0]
         
@@ -42,66 +45,67 @@ def generar_polizas(df, is_egresos):
             if rol == "purchase":
                 prov = str(r["nombre_emisor"])[:50]
                 if metodo == "PPD":
-                    pol.append([num, "Diario", fecha_limpia, c_principal, neto, 0, concepto, uuid])
-                    if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_pago, iva, 0, "IVA pendiente", uuid])
-                    pol.append([num, "Diario", fecha_limpia, c_proveedores, 0, tot, prov, uuid])
+                    pol.append([num, "Diario", fecha_limpia, c_principal, ref, neto, 0, concepto, uuid])
+                    if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_pago, ref, iva, 0, "IVA pendiente", uuid])
+                    pol.append([num, "Diario", fecha_limpia, c_proveedores, ref, 0, tot, prov, uuid])
                 else:
-                    pol.append([num, "Egreso", fecha_limpia, c_principal, neto, 0, concepto, uuid])
-                    if iva > 0: pol.append([num, "Egreso", fecha_limpia, c_iva_pagado, iva, 0, "IVA acreditable", uuid])
-                    pol.append([num, "Egreso", fecha_limpia, c_banco, 0, tot, prov, uuid])
+                    pol.append([num, "Egreso", fecha_limpia, c_principal, ref, neto, 0, concepto, uuid])
+                    if iva > 0: pol.append([num, "Egreso", fecha_limpia, c_iva_pagado, ref, iva, 0, "IVA acreditable", uuid])
+                    pol.append([num, "Egreso", fecha_limpia, c_banco, ref, 0, tot, prov, uuid])
             else:
                 cli = str(r["nombre_receptor"])[:50]
                 c_principal = c_principal if c_principal != "PENDIENTE" else c_ventas
                 if metodo == "PPD":
-                    pol.append([num, "Diario", fecha_limpia, c_clientes, tot, 0, cli, uuid])
-                    pol.append([num, "Diario", fecha_limpia, c_principal, 0, neto, concepto, uuid])
-                    if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_cobro, 0, iva, "IVA Pdte Cobro", uuid])
+                    pol.append([num, "Diario", fecha_limpia, c_clientes, ref, tot, 0, cli, uuid])
+                    pol.append([num, "Diario", fecha_limpia, c_principal, ref, 0, neto, concepto, uuid])
+                    if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_cobro, ref, 0, iva, "IVA Pdte Cobro", uuid])
                 else:
-                    pol.append([num, "Ingreso", fecha_limpia, c_banco, tot, 0, cli, uuid])
-                    pol.append([num, "Ingreso", fecha_limpia, c_principal, 0, neto, concepto, uuid])
-                    if iva > 0: pol.append([num, "Ingreso", fecha_limpia, c_iva_cobrado, 0, iva, "IVA Cobrado", uuid])
+                    pol.append([num, "Ingreso", fecha_limpia, c_banco, ref, tot, 0, cli, uuid])
+                    pol.append([num, "Ingreso", fecha_limpia, c_principal, ref, 0, neto, concepto, uuid])
+                    if iva > 0: pol.append([num, "Ingreso", fecha_limpia, c_iva_cobrado, ref, 0, iva, "IVA Cobrado", uuid])
 
         # 2. TIPO "E" (EGRESOS / NOTAS DE CRÉDITO)
         elif tipo == "E":
             if rol == "purchase":
                 prov = str(r["nombre_emisor"])[:50]
-                pol.append([num, "Diario", fecha_limpia, c_proveedores, tot, 0, f"NC Prov - {prov}", uuid])
-                pol.append([num, "Diario", fecha_limpia, c_principal, 0, neto, concepto, uuid])
-                if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_pago, 0, iva, "Reversión IVA Pdte", uuid])
+                pol.append([num, "Diario", fecha_limpia, c_proveedores, ref, tot, 0, f"NC Prov - {prov}", uuid])
+                pol.append([num, "Diario", fecha_limpia, c_principal, ref, 0, neto, concepto, uuid])
+                if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_pago, ref, 0, iva, "Reversión IVA Pdte", uuid])
             else:
                 cli = str(r["nombre_receptor"])[:50]
                 c_principal = c_principal if c_principal != "PENDIENTE" else c_ventas
-                pol.append([num, "Diario", fecha_limpia, c_principal, neto, 0, concepto, uuid])
-                if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_cobro, iva, 0, "Reversión IVA Pdte", uuid])
-                pol.append([num, "Diario", fecha_limpia, c_clientes, 0, tot, f"NC Cli - {cli}", uuid])
+                pol.append([num, "Diario", fecha_limpia, c_principal, ref, neto, 0, concepto, uuid])
+                if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_cobro, ref, iva, 0, "Reversión IVA Pdte", uuid])
+                pol.append([num, "Diario", fecha_limpia, c_clientes, ref, 0, tot, f"NC Cli - {cli}", uuid])
 
         # 3. TIPO "P" (PAGOS / REPs)
         elif tipo == "P":
             if rol == "purchase":
-                pol.append([num, "Egreso", fecha_limpia, c_proveedores, tot, 0, concepto, uuid])
-                pol.append([num, "Egreso", fecha_limpia, c_banco, 0, tot, "Salida a Proveedor", uuid])
+                pol.append([num, "Egreso", fecha_limpia, c_proveedores, ref, tot, 0, concepto, uuid])
+                pol.append([num, "Egreso", fecha_limpia, c_banco, ref, 0, tot, "Salida a Proveedor", uuid])
                 if iva > 0:
-                    pol.append([num, "Egreso", fecha_limpia, c_iva_pagado, iva, 0, "Reclasifica IVA Acred", uuid])
-                    pol.append([num, "Egreso", fecha_limpia, c_iva_pdte_pago, 0, iva, "Mata IVA Pdte", uuid])
+                    pol.append([num, "Egreso", fecha_limpia, c_iva_pagado, ref, iva, 0, "Reclasifica IVA Acred", uuid])
+                    pol.append([num, "Egreso", fecha_limpia, c_iva_pdte_pago, ref, 0, iva, "Mata IVA Pdte", uuid])
             else:
-                pol.append([num, "Ingreso", fecha_limpia, c_banco, tot, 0, "Entrada de Cliente", uuid])
-                pol.append([num, "Ingreso", fecha_limpia, c_clientes, 0, tot, concepto, uuid])
+                pol.append([num, "Ingreso", fecha_limpia, c_banco, ref, tot, 0, "Entrada de Cliente", uuid])
+                pol.append([num, "Ingreso", fecha_limpia, c_clientes, ref, 0, tot, concepto, uuid])
                 if iva > 0:
-                    pol.append([num, "Ingreso", fecha_limpia, c_iva_pdte_cobro, iva, 0, "Mata IVA Pdte Cobro", uuid])
-                    pol.append([num, "Ingreso", fecha_limpia, c_iva_cobrado, 0, iva, "Reclasifica IVA Cobrado", uuid])
+                    pol.append([num, "Ingreso", fecha_limpia, c_iva_pdte_cobro, ref, iva, 0, "Mata IVA Pdte Cobro", uuid])
+                    pol.append([num, "Ingreso", fecha_limpia, c_iva_cobrado, ref, 0, iva, "Reclasifica IVA Cobrado", uuid])
 
         # 4. TIPO "N" (NÓMINAS)
         elif tipo == "N":
             c_nom = cuentas.get("nomina", "60010000")
             c_ret_isr = cuentas.get("retencion_isr", "21601000")
-            pol.append([num, "Diario", fecha_limpia, c_nom, float(r["subtotal"]), 0, f"Provisión Nómina {r['departamento']}"[:50], ""])
+            pol.append([num, "Diario", fecha_limpia, c_nom, ref, float(r["subtotal"]), 0, f"Provisión Nómina {r['departamento']}"[:50], ""])
             if float(r["ret_isr"]) > 0: 
-                pol.append([num, "Diario", fecha_limpia, c_ret_isr, 0, float(r["ret_isr"]), "Ret ISR Nomina", ""])
-            pol.append([num, "Diario", fecha_limpia, c_banco, 0, tot, "Neto a Pagar", ""])
+                pol.append([num, "Diario", fecha_limpia, c_ret_isr, ref, 0, float(r["ret_isr"]), "Ret ISR Nomina", ""])
+            pol.append([num, "Diario", fecha_limpia, c_banco, ref, 0, tot, "Neto a Pagar", ""])
             
         num += 1
 
-    return pd.DataFrame(pol, columns=["Numero", "Tipo", "Fecha", "Cuenta", "Debe", "Haber", "Concepto", "UUID"])
+    # Agregamos la columna "Referencia" al Dataframe
+    return pd.DataFrame(pol, columns=["Numero", "Tipo", "Fecha", "Cuenta", "Referencia", "Debe", "Haber", "Concepto", "UUID"])
 
 def generar_sugerencia(row, df_cat):
     c_act = str(row.get("cuenta", "")).strip()
@@ -128,16 +132,13 @@ def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
     txt_filename = excel_filename.replace(".xlsx", ".txt")
     filepath = os.path.join(output_dir, txt_filename)
     
-    # CONTPAQi usa la codificación windows-1252 (ANSI) para los acentos en México
     with open(filepath, "w", encoding="windows-1252", errors="replace") as f:
         for num, group in polizas_df.groupby("Numero"):
             primera_fila = group.iloc[0]
             
-            # Formato de Fecha YYYYMMDD
             fecha_str = str(primera_fila["Fecha"]).replace("-", "")
             if len(fecha_str) != 8: fecha_str = "20260101"
             
-            # Diccionario de Tipos de Póliza en CONTPAQi: 1=Ingreso, 2=Egreso, 3=Diario
             tipo_str = str(primera_fila["Tipo"]).upper()
             tipo_int = "3" 
             if "INGRESO" in tipo_str: tipo_int = "1"
@@ -145,13 +146,18 @@ def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
             
             concepto_poliza = str(primera_fila["Concepto"])[:100]
             
-            # ENCABEZADO DE PÓLIZA: P  Fecha  Tipo  Numero  1  0  Concepto
-            f.write(f"P {fecha_str} {tipo_int} {num} 1 0 {concepto_poliza}\n")
+            # Encabezado sin el "0" que causaba el crash de Diarios
+            f.write(f"P {fecha_str} {tipo_int} {num} 1   {concepto_poliza}\n")
             
-            # MOVIMIENTOS
             for _, r in group.iterrows():
-                cuenta = str(r["Cuenta"]).replace("-", "")
-                if cuenta == "PENDIENTE": continue # Evitamos crashear CONTPAQi
+                # Conservamos los guiones si existen
+                cuenta = str(r["Cuenta"]).strip()
+                if cuenta == "PENDIENTE" or "FALTA" in cuenta.upper():
+                    continue 
+                
+                # INYECTAR LA REFERENCIA: Reemplazamos espacios por guiones bajos para no romper las columnas del TXT
+                referencia = str(r.get("Referencia", "SR")).strip().replace(" ", "_")[:20]
+                if not referencia: referencia = "SR"
                 
                 debe = float(r["Debe"])
                 haber = float(r["Haber"])
@@ -161,12 +167,11 @@ def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
                 tipo_mov = "0" if debe > 0 else "1"
                 importe = debe if debe > 0 else haber
                 
-                if importe == 0: continue # No mandamos líneas en cero
+                if importe == 0: continue 
                 
-                # MOVIMIENTO: M  Cuenta  Referencia  TipoMov  Importe  0  0  Concepto
-                f.write(f"M {cuenta}  {tipo_mov} {importe:.2f} 0 0 {concepto_mov}\n")
+                # LA NUEVA ESTRUCTURA INCLUYE LA REFERENCIA DESPUÉS DE LA CUENTA
+                f.write(f"M {cuenta} {referencia} {tipo_mov} {importe:.2f} 0 0 {concepto_mov}\n")
                 
-                # ASOCIAR UUID: AD  UUID
                 if uuid and uuid != "nan" and len(uuid) == 36:
                     f.write(f"AD {uuid}\n")
                     
@@ -181,10 +186,10 @@ def exportar(df, diot_df, output_dir, filename, log_data):
     res_df = pd.DataFrame([{"Métrica": k, "Cantidad": v} for k, v in log_data.items()])
     df["Sugerencia"] = df.apply(lambda r: generar_sugerencia(r, df_catalogo), axis=1)
 
-    # 1. Generamos el DataFrame maestro de pólizas
+    # 1. Generamos el DataFrame maestro de pólizas (Ahora incluye Referencia)
     polizas_df = generar_polizas(df, is_egresos)
 
-    # 2. Generamos el Excel para tu revisión/entrenamiento
+    # 2. Generamos el Excel
     with pd.ExcelWriter(filepath, engine='openpyxl') as w:
         res_df.to_excel(w, sheet_name="RESUMEN", index=False)
         auto_ajustar_columnas(w, "RESUMEN", res_df)
@@ -199,7 +204,7 @@ def exportar(df, diot_df, output_dir, filename, log_data):
             diot_df.to_excel(w, sheet_name="DIOT", index=False)
             auto_ajustar_columnas(w, "DIOT", diot_df)
             
-    # 3. GENERAMOS EL TXT NATIVO DE CONTPAQI
+    # 3. GENERAMOS EL TXT NATIVO DE CONTPAQI (Con la nueva Referencia)
     exportar_txt_contpaqi(polizas_df, output_dir, filename)
 
     try:

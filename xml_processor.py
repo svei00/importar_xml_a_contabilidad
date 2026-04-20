@@ -13,6 +13,11 @@ def parse_xml(source):
     subtotal = float(root.attrib.get("SubTotal", 0))
     cp = root.attrib.get("LugarExpedicion", "")
     metodo_pago = root.attrib.get("MetodoPago", "")
+    
+    # EXTRAER SERIE Y FOLIO PARA LA REFERENCIA
+    serie = root.attrib.get("Serie", "")
+    folio = root.attrib.get("Folio", "")
+    referencia_xml = f"{serie}{folio}".strip()
 
     em = root.find(f'{ns_cfdi}Emisor')
     re = root.find(f'{ns_cfdi}Receptor')
@@ -36,7 +41,6 @@ def parse_xml(source):
     monto_pago_rep = 0.0
     doctos_relacionados = []
 
-    # 1. Extraer impuestos del nodo global (Aplica a Ingresos y Egresos normales)
     nodo_impuestos_global = root.find(f'./{ns_cfdi}Impuestos')
     if nodo_impuestos_global is not None:
         for t in nodo_impuestos_global.findall(f'.//{ns_cfdi}Traslado'):
@@ -55,7 +59,6 @@ def parse_xml(source):
             if impuesto == "001": ret_isr += importe
             elif impuesto == "002": ret_iva += importe
 
-    # 2. Extraer datos específicos (REPs y Nóminas)
     for elem in root.iter():
         tag = elem.tag.split('}')[-1]
         
@@ -70,20 +73,23 @@ def parse_xml(source):
             doc_id = elem.attrib.get("IdDocumento")
             if doc_id: doctos_relacionados.append(doc_id)
             
-        # BUGFIX: En CFDI 4.0 el REP trae TrasladoP (Total del pago) y TrasladoDR (Por documento).
-        # Para evitar duplicar impuestos, leemos ESTRICTAMENTE el TrasladoP.
         elif tag == 'TrasladoP':
             if elem.attrib.get("ImpuestoP") == "002":
                 tasa = elem.attrib.get("TasaOCuotaP", "0")
                 if tasa == "0.160000":
                     iva_16 += float(elem.attrib.get("ImporteP", 0))
 
-    # Si es tipo "P", el total se saca del nodo del pago
     if tipo == "P":
         total = monto_pago_rep
         concepto = f"Pago a UUID: {doctos_relacionados[0][:8]}..." if doctos_relacionados else "REP de Pago"
+        # Si es un pago, la referencia es el UUID al que está pagando
+        referencia_xml = doctos_relacionados[0][:8] if doctos_relacionados else "REP"
     elif not metodo_pago:
         metodo_pago = "PUE" 
+        
+    # Si la factura no tiene serie ni folio, usamos el nombre del emisor/receptor como referencia
+    if not referencia_xml:
+        referencia_xml = em.attrib.get("Nombre", "S/R") if tipo in ["I", "E", "P"] else "NOMINA"
 
     return {
         "uuid": uuid, "tipo": tipo, "fecha": root.attrib.get("Fecha"),
@@ -93,7 +99,7 @@ def parse_xml(source):
         "nombre_receptor": re.attrib.get("Nombre", "") if re is not None else "",
         "concepto": concepto, "subtotal": subtotal, "total": total, "cp": cp,
         "iva_16": iva_16, "iva_8": iva_8, "iva_exento": iva_exento, "ieps": ieps,
-        "ret_iva": ret_iva, "ret_isr": ret_isr
+        "ret_iva": ret_iva, "ret_isr": ret_isr, "referencia": referencia_xml # <-- Se pasa la referencia
     }
 
 def load_folder(folder):

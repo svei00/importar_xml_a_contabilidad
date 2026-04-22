@@ -2,6 +2,14 @@ import pandas as pd
 import os
 from config import load_settings, cargar_catalogo
 
+# ==========================================
+# CONFIGURACIÓN DE DIARIOS PARA CONTPAQI
+# ==========================================
+# Forzamos el diario a "21" para cumplir con la regla de tu empresa en CONTPAQi
+DIARIO_POLIZA = "21"   
+DIARIO_MOVIMIENTO = "21"
+SEGMENTO_NEGOCIO = "0"
+
 def generar_polizas(df, is_egresos):
     settings = load_settings()
     cuentas = settings.get("cuentas_default", {})
@@ -26,15 +34,13 @@ def generar_polizas(df, is_egresos):
         uuid = str(r["uuid"]).strip()
         concepto = str(r["concepto"])[:50]
         
-        # ELIMINAMOS ESPACIOS DESDE LA BASE PARA BLINDAR CONTPAQI
         ref_base = str(r.get("referencia", "")).strip().replace(" ", "_")
         if not ref_base or ref_base == "nan": ref_base = "SR"
         
         nombre_tercero = str(r.get("nombre_emisor", "")) if is_egresos else str(r.get("nombre_receptor", ""))
         if nombre_tercero.lower() == "nan": nombre_tercero = ""
-        nombre_tercero = nombre_tercero.replace(" ", "_") # <-- CORRECCIÓN: Nombres sin espacios
+        nombre_tercero = nombre_tercero.replace(" ", "_") 
         
-        # Concatenamos Nombre_Serie-Folio para mejor ordenamiento en Auxiliares de CONTPAQi
         if nombre_tercero:
             espacio_nombre = 30 - len(ref_base) - 1 
             nombre_corto = nombre_tercero[:espacio_nombre].strip("_")
@@ -113,9 +119,7 @@ def generar_polizas(df, is_egresos):
         num += 1
 
     polizas_df = pd.DataFrame(pol, columns=["Numero", "Tipo", "Fecha", "Cuenta", "Referencia", "Debe", "Haber", "Concepto", "UUID"])
-    
-    # FIX EXCEL: Convertimos la Fecha en un objeto de Date nativo para que Excel no pelee con los formatos
-    polizas_df["Fecha"] = pd.to_datetime(polizas_df["Fecha"], errors="coerce").dt.date
+    polizas_df["Fecha"] = polizas_df["Fecha"].astype(str)
     return polizas_df
 
 def generar_sugerencia(row, df_cat):
@@ -139,12 +143,9 @@ def auto_ajustar_columnas(writer, sheet_name, df):
         col_letter = __import__('openpyxl').utils.get_column_letter(i + 1)
         worksheet.column_dimensions[col_letter].width = min(max_len, 50)
         
-        # FIX EXCEL: Blindar formatos (Cuentas siempre a la Izquierda como Texto, Fechas unificadas)
         for cell in worksheet[col_letter]:
-            if col in ["Cuenta", "Referencia"]:
-                cell.number_format = '@' 
-            elif col == "Fecha":
-                cell.number_format = 'yyyy-mm-dd'
+            if col in ["Cuenta", "Referencia", "Fecha"]:
+                cell.number_format = '@'
 
 def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
     txt_filename = excel_filename.replace(".xlsx", ".txt")
@@ -164,25 +165,29 @@ def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
             if "INGRESO" in tipo_str: tipo_int = "1"
             elif "EGRESO" in tipo_str: tipo_int = "2"
             
-            concepto_poliza = str(primera_fila["Concepto"])[:100]
-            if not concepto_poliza.strip(): concepto_poliza = "Sin_Concepto"
+            concepto_poliza = str(primera_fila["Concepto"])[:100].strip()
+            if not concepto_poliza: concepto_poliza = "Sin_Concepto"
             
-            # FIX TXT: Regresamos los ceros ('0') de Diarios para evitar que CONTPAQi recorra las columnas.
-            f.write(f"P {fecha_str} {tipo_int} {num} 1 0 {concepto_poliza}\n")
+            f.write(f"P {fecha_str} {tipo_int} {num} 1 {DIARIO_POLIZA} {concepto_poliza}\n")
             
             for _, r in group.iterrows():
-                cuenta = str(r["Cuenta"]).strip()
+                cuenta_val = r["Cuenta"]
+                if pd.isna(cuenta_val): cuenta_val = "PENDIENTE"
+                if isinstance(cuenta_val, float): cuenta_val = int(cuenta_val)
+                cuenta = str(cuenta_val).strip()
+                
                 if cuenta == "PENDIENTE" or "FALTA" in cuenta.upper():
                     continue 
                 
-                # La referencia ya viene limpia del DataFrame
-                referencia = str(r.get("Referencia", "SR")).strip()[:30]
+                referencia = str(r.get("Referencia", "SR")).strip().replace(" ", "_")[:30]
                 if not referencia or referencia == "nan": referencia = "SR"
                 
                 debe = float(r["Debe"])
                 haber = float(r["Haber"])
-                concepto_mov = str(r["Concepto"])[:100]
-                if not concepto_mov.strip(): concepto_mov = "Sin_Concepto"
+                
+                concepto_mov = str(r["Concepto"])[:100].strip()
+                if not concepto_mov: concepto_mov = "Sin_Concepto"
+                
                 uuid = str(r["UUID"]).strip()
                 
                 tipo_mov = "0" if debe > 0 else "1"
@@ -190,7 +195,7 @@ def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
                 
                 if importe == 0: continue 
                 
-                f.write(f"M {cuenta} {referencia} {tipo_mov} {importe:.2f} 0 0 {concepto_mov}\n")
+                f.write(f"M {cuenta} {referencia} {tipo_mov} {importe:.2f} {DIARIO_MOVIMIENTO} {SEGMENTO_NEGOCIO} {concepto_mov}\n")
                 
                 if uuid and uuid != "nan" and len(uuid) == 36:
                     f.write(f"AD {uuid}\n")

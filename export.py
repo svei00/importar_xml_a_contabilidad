@@ -6,8 +6,8 @@ from config import load_settings, cargar_catalogo
 # CONFIGURACIÓN DE DIARIOS PARA CONTPAQI
 # ==========================================
 # Forzamos el diario a "21" para cumplir con la regla de tu empresa en CONTPAQi
-DIARIO_POLIZA = "21"   
-DIARIO_MOVIMIENTO = "21"
+DIARIO_POLIZA = "0"   
+DIARIO_MOVIMIENTO = "0"
 SEGMENTO_NEGOCIO = "0"
 
 def generar_polizas(df, is_egresos):
@@ -148,58 +148,101 @@ def auto_ajustar_columnas(writer, sheet_name, df):
                 cell.number_format = '@'
 
 def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
+    """
+    Genera el TXT de importación de pólizas para CONTPAQi NG.
+
+    Formato correcto de cada línea:
+      P  TipoPóliza  NúmPóliza  Fecha(YYYYMMDD)  DiarioEspecial  Concepto
+      M  Cuenta  Referencia  TipoMov(0=Cargo/1=Abono)  Importe  Diario  Segmento  Concepto
+      AD UUID
+    """
     txt_filename = excel_filename.replace(".xlsx", ".txt")
     filepath = os.path.join(output_dir, txt_filename)
-    
+
+    polizas_pendientes = []  # pólizas omitidas por tener cuentas PENDIENTE
+
     with open(filepath, "w", encoding="windows-1252", errors="replace") as f:
         for num, group in polizas_df.groupby("Numero"):
             primera_fila = group.iloc[0]
-            
+
+            # --- Fecha ---
             try:
                 fecha_str = pd.to_datetime(primera_fila["Fecha"]).strftime("%Y%m%d")
-            except:
+            except Exception:
                 fecha_str = "20260101"
-            
+
+            # --- Tipo de póliza: 1=Ingreso 2=Egreso 3=Diario ---
             tipo_str = str(primera_fila["Tipo"]).upper()
-            tipo_int = "3" 
-            if "INGRESO" in tipo_str: tipo_int = "1"
-            elif "EGRESO" in tipo_str: tipo_int = "2"
-            
-            concepto_poliza = str(primera_fila["Concepto"])[:100].strip()
-            if not concepto_poliza: concepto_poliza = "Sin_Concepto"
-            
-            f.write(f"P {fecha_str} {tipo_int} {num} 1 {DIARIO_POLIZA} {concepto_poliza}\n")
-            
+            tipo_int = "3"
+            if "INGRESO" in tipo_str:
+                tipo_int = "1"
+            elif "EGRESO" in tipo_str:
+                tipo_int = "2"
+
+            # --- Concepto (sin espacios al inicio/fin, máx 100 chars) ---
+            concepto_poliza = str(primera_fila["Concepto"])[:100].strip().replace("\n", " ")
+            if not concepto_poliza:
+                concepto_poliza = "Sin_Concepto"
+
+            # Verificar si algún movimiento tiene cuenta PENDIENTE para advertir
+            cuentas_grupo = group["Cuenta"].astype(str).str.strip()
+            tiene_pendiente = cuentas_grupo.isin(["PENDIENTE", "nan", ""]).any() or \
+                              cuentas_grupo.str.upper().str.contains("FALTA").any()
+            if tiene_pendiente:
+                polizas_pendientes.append(num)
+
+            # ── Línea P ─────────────────────────────────────────────────────
+            # ORDEN CORRECTO: P TipoPóliza NúmPóliza Fecha Diario Concepto
+            f.write(f"P {tipo_int} {num} {fecha_str} {DIARIO_POLIZA} {concepto_poliza}\n")
+
+            # ── Líneas M + AD ────────────────────────────────────────────────
             for _, r in group.iterrows():
                 cuenta_val = r["Cuenta"]
-                if pd.isna(cuenta_val): cuenta_val = "PENDIENTE"
-                if isinstance(cuenta_val, float): cuenta_val = int(cuenta_val)
+                if pd.isna(cuenta_val):
+                    cuenta_val = "PENDIENTE"
+                if isinstance(cuenta_val, float):
+                    cuenta_val = int(cuenta_val)
                 cuenta = str(cuenta_val).strip()
-                
-                if cuenta == "PENDIENTE" or "FALTA" in cuenta.upper():
-                    continue 
-                
+
+                # Omitir movimientos sin cuenta válida
+                if not cuenta or cuenta in ("PENDIENTE", "nan", "0") or "FALTA" in cuenta.upper():
+                    continue
+
                 referencia = str(r.get("Referencia", "SR")).strip().replace(" ", "_")[:30]
-                if not referencia or referencia == "nan": referencia = "SR"
-                
+                if not referencia or referencia == "nan":
+                    referencia = "SR"
+
                 debe = float(r["Debe"])
                 haber = float(r["Haber"])
-                
-                concepto_mov = str(r["Concepto"])[:100].strip()
-                if not concepto_mov: concepto_mov = "Sin_Concepto"
-                
+
+                concepto_mov = str(r["Concepto"])[:100].strip().replace("\n", " ")
+                if not concepto_mov:
+                    concepto_mov = "Sin_Concepto"
+
                 uuid = str(r["UUID"]).strip()
-                
+
+                # TipoMov: 0 = Cargo (Debe), 1 = Abono (Haber)
                 tipo_mov = "0" if debe > 0 else "1"
                 importe = debe if debe > 0 else haber
-                
-                if importe == 0: continue 
-                
-                f.write(f"M {cuenta} {referencia} {tipo_mov} {importe:.2f} {DIARIO_MOVIMIENTO} {SEGMENTO_NEGOCIO} {concepto_mov}\n")
-                
+
+                if importe == 0:
+                    continue
+
+                f.write(
+                    f"M {cuenta} {referencia} {tipo_mov} {importe:.2f}"
+                    f" {DIARIO_MOVIMIENTO} {SEGMENTO_NEGOCIO} {concepto_mov}\n"
+                )
+
                 if uuid and uuid != "nan" and len(uuid) == 36:
                     f.write(f"AD {uuid}\n")
-                    
+
+    if polizas_pendientes:
+        print(
+            f"⚠️  ADVERTENCIA: Las siguientes pólizas tienen movimientos con cuenta "
+            f"PENDIENTE y fueron omitidos del TXT (corrígelas en el Excel y usa "
+            f"'Aprender de Excel Corregido'): {polizas_pendientes}"
+        )
+
     return filepath
 
 def exportar(df, diot_df, output_dir, filename, log_data):

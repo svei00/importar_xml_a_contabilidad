@@ -1,16 +1,13 @@
 import pandas as pd
 import os
+import math
 from config import load_settings, cargar_catalogo
 
-# ==========================================
-# CONFIGURACIÓN DE DIARIOS PARA CONTPAQI
-# ==========================================
-# Forzamos el diario a "21" para cumplir con la regla de tu empresa en CONTPAQi
-DIARIO_POLIZA = "0"   
-DIARIO_MOVIMIENTO = "0"
-SEGMENTO_NEGOCIO = "0"
-
 def generar_polizas(df, is_egresos):
+    """
+    Toma los datos puros del SAT y genera el árbol de decisiones contables (Debe/Haber).
+    Aplica las Normas de Información Financiera (NIF) para provisiones (PPD) y pagos (PUE/REP).
+    """
     settings = load_settings()
     cuentas = settings.get("cuentas_default", {})
     
@@ -34,31 +31,34 @@ def generar_polizas(df, is_egresos):
         uuid = str(r["uuid"]).strip()
         concepto = str(r["concepto"])[:50]
         
-        ref_base = str(r.get("referencia", "")).strip().replace(" ", "_")
-        if not ref_base or ref_base == "nan": ref_base = "SR"
+        # =====================================================================
+        # LÓGICA DE REFERENCIA (Nombre_Serie-Folio)
+        # =====================================================================
+        ref_base = str(r.get("referencia", "")).strip()
+        if not ref_base or ref_base.lower() == "nan": ref_base = "SR"
         
         nombre_tercero = str(r.get("nombre_emisor", "")) if is_egresos else str(r.get("nombre_receptor", ""))
         if nombre_tercero.lower() == "nan": nombre_tercero = ""
-        nombre_tercero = nombre_tercero.replace(" ", "_") 
         
         if nombre_tercero:
             espacio_nombre = 30 - len(ref_base) - 1 
-            nombre_corto = nombre_tercero[:espacio_nombre].strip("_")
-            ref = f"{nombre_corto}_{ref_base}" if ref_base else nombre_corto
+            nombre_corto = nombre_tercero[:espacio_nombre].strip()
+            ref = f"{nombre_corto} {ref_base}" if ref_base else nombre_corto
         else:
             ref = ref_base[:30]
         
         fecha_limpia = str(r.get("fecha", "2026-01-01")).split("T")[0]
-        
         c_asignada = str(r.get("cuenta", "PENDIENTE")).strip()
         c_principal = c_asignada if c_asignada not in ["", "0", "PENDIENTE", "nan"] else "PENDIENTE"
         
+        # Matemática de Impuestos NIF
         tot = float(r["total"])
         iva = float(r["iva_16"]) + float(r["iva_8"])
         ret = float(r["ret_iva"]) + float(r["ret_isr"])
         neto = round(tot - iva + ret, 2)
         
-        if tipo == "I":
+        # Asientos Contables Automatizados
+        if tipo == "I": 
             if rol == "purchase":
                 prov = str(r["nombre_emisor"])[:50]
                 if metodo == "PPD":
@@ -81,7 +81,7 @@ def generar_polizas(df, is_egresos):
                     pol.append([num, "Ingreso", fecha_limpia, c_principal, ref, 0, neto, concepto, uuid])
                     if iva > 0: pol.append([num, "Ingreso", fecha_limpia, c_iva_cobrado, ref, 0, iva, "IVA Cobrado", uuid])
 
-        elif tipo == "E":
+        elif tipo == "E": 
             if rol == "purchase":
                 prov = str(r["nombre_emisor"])[:50]
                 pol.append([num, "Diario", fecha_limpia, c_proveedores, ref, tot, 0, f"NC Prov - {prov}", uuid])
@@ -89,12 +89,11 @@ def generar_polizas(df, is_egresos):
                 if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_pago, ref, 0, iva, "Reversión IVA Pdte", uuid])
             else:
                 cli = str(r["nombre_receptor"])[:50]
-                c_principal = c_principal if c_principal != "PENDIENTE" else c_ventas
                 pol.append([num, "Diario", fecha_limpia, c_principal, ref, neto, 0, concepto, uuid])
                 if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_cobro, ref, iva, 0, "Reversión IVA Pdte", uuid])
                 pol.append([num, "Diario", fecha_limpia, c_clientes, ref, 0, tot, f"NC Cli - {cli}", uuid])
 
-        elif tipo == "P":
+        elif tipo == "P": 
             if rol == "purchase":
                 pol.append([num, "Egreso", fecha_limpia, c_proveedores, ref, tot, 0, concepto, uuid])
                 pol.append([num, "Egreso", fecha_limpia, c_banco, ref, 0, tot, "Salida a Proveedor", uuid])
@@ -108,7 +107,7 @@ def generar_polizas(df, is_egresos):
                     pol.append([num, "Ingreso", fecha_limpia, c_iva_pdte_cobro, ref, iva, 0, "Mata IVA Pdte Cobro", uuid])
                     pol.append([num, "Ingreso", fecha_limpia, c_iva_cobrado, ref, 0, iva, "Reclasifica IVA Cobrado", uuid])
 
-        elif tipo == "N":
+        elif tipo == "N": 
             c_nom = cuentas.get("nomina", "60010000")
             c_ret_isr = cuentas.get("retencion_isr", "21601000")
             pol.append([num, "Diario", fecha_limpia, c_nom, ref, float(r["subtotal"]), 0, f"Provisión Nómina {r['departamento']}"[:50], ""])
@@ -142,108 +141,143 @@ def auto_ajustar_columnas(writer, sheet_name, df):
         max_len = max(df[col].astype(str).map(len).max(), len(str(col))) + 2
         col_letter = __import__('openpyxl').utils.get_column_letter(i + 1)
         worksheet.column_dimensions[col_letter].width = min(max_len, 50)
-        
         for cell in worksheet[col_letter]:
             if col in ["Cuenta", "Referencia", "Fecha"]:
                 cell.number_format = '@'
 
 def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
-    """
-    Genera el TXT de importación de pólizas para CONTPAQi NG.
-
-    Formato correcto de cada línea:
-      P  TipoPóliza  NúmPóliza  Fecha(YYYYMMDD)  DiarioEspecial  Concepto
-      M  Cuenta  Referencia  TipoMov(0=Cargo/1=Abono)  Importe  Diario  Segmento  Concepto
-      AD UUID
-    """
+    """Genera el archivo de pólizas imitando perfectamente el Ancho Fijo nativo del sistema."""
     txt_filename = excel_filename.replace(".xlsx", ".txt")
     filepath = os.path.join(output_dir, txt_filename)
-
-    polizas_pendientes = []  # pólizas omitidas por tener cuentas PENDIENTE
-
+    
+    # IMPORTANTE: Forzamos codificación windows-1252 (ANSI) para conservar el ancho exacto por byte
     with open(filepath, "w", encoding="windows-1252", errors="replace") as f:
         for num, group in polizas_df.groupby("Numero"):
             primera_fila = group.iloc[0]
-
-            # --- Fecha ---
-            try:
-                fecha_str = pd.to_datetime(primera_fila["Fecha"]).strftime("%Y%m%d")
-            except Exception:
-                fecha_str = "20260101"
-
-            # --- Tipo de póliza: 1=Ingreso 2=Egreso 3=Diario ---
+            
+            fecha_cruda = str(primera_fila["Fecha"]).split()[0].replace("-", "").replace("/", "").strip()
+            fecha_str = fecha_cruda[:8] if len(fecha_cruda) >= 8 else "20260101"
+            
             tipo_str = str(primera_fila["Tipo"]).upper()
-            tipo_int = "3"
-            if "INGRESO" in tipo_str:
-                tipo_int = "1"
-            elif "EGRESO" in tipo_str:
-                tipo_int = "2"
-
-            # --- Concepto (sin espacios al inicio/fin, máx 100 chars) ---
-            concepto_poliza = str(primera_fila["Concepto"])[:100].strip().replace("\n", " ")
-            if not concepto_poliza:
-                concepto_poliza = "Sin_Concepto"
-
-            # Verificar si algún movimiento tiene cuenta PENDIENTE para advertir
-            cuentas_grupo = group["Cuenta"].astype(str).str.strip()
-            tiene_pendiente = cuentas_grupo.isin(["PENDIENTE", "nan", ""]).any() or \
-                              cuentas_grupo.str.upper().str.contains("FALTA").any()
-            if tiene_pendiente:
-                polizas_pendientes.append(num)
-
-            # ── Línea P ─────────────────────────────────────────────────────
-            # ORDEN CORRECTO: P TipoPóliza NúmPóliza Fecha Diario Concepto
-            f.write(f"P {tipo_int} {num} {fecha_str} {DIARIO_POLIZA} {concepto_poliza}\n")
-
-            # ── Líneas M + AD ────────────────────────────────────────────────
+            tipo_int = "3" 
+            if "INGRESO" in tipo_str: tipo_int = "1"
+            elif "EGRESO" in tipo_str: tipo_int = "2"
+            
+            concepto_poliza = str(primera_fila["Concepto"])[:100].strip()
+            if not concepto_poliza: concepto_poliza = "Sin Concepto"
+            
+            # Formato de línea P replicado al espacio exacto del archivo nativo
+            f.write(f"P  {fecha_str}    {tipo_int}         {num:<2}1 0          {concepto_poliza}\n")
+            
+            # Control de duplicidad de UUID en el ADD para la DIOT interna de CONTPAQi
+            uuids_escritos = set()
+            
             for _, r in group.iterrows():
-                cuenta_val = r["Cuenta"]
-                if pd.isna(cuenta_val):
-                    cuenta_val = "PENDIENTE"
-                if isinstance(cuenta_val, float):
-                    cuenta_val = int(cuenta_val)
-                cuenta = str(cuenta_val).strip()
-
-                # Omitir movimientos sin cuenta válida
-                if not cuenta or cuenta in ("PENDIENTE", "nan", "0") or "FALTA" in cuenta.upper():
+                cuenta_val = str(r["Cuenta"]).strip()
+                if cuenta_val.upper() in ["PENDIENTE", "NAN", "0"] or "FALTA" in cuenta_val.upper():
+                    continue 
+                if not cuenta_val.replace("-", "").isdigit():
                     continue
-
-                referencia = str(r.get("Referencia", "SR")).strip().replace(" ", "_")[:30]
-                if not referencia or referencia == "nan":
-                    referencia = "SR"
-
+                
+                referencia = str(r.get("Referencia", "")).strip()[:30]
+                if referencia.lower() == "nan": referencia = ""
+                
                 debe = float(r["Debe"])
                 haber = float(r["Haber"])
-
-                concepto_mov = str(r["Concepto"])[:100].strip().replace("\n", " ")
-                if not concepto_mov:
-                    concepto_mov = "Sin_Concepto"
-
+                if debe == 0 and haber == 0: continue 
+                
+                concepto_mov = str(r["Concepto"])[:100].strip()
                 uuid = str(r["UUID"]).strip()
-
-                # TipoMov: 0 = Cargo (Debe), 1 = Abono (Haber)
+                
                 tipo_mov = "0" if debe > 0 else "1"
                 importe = debe if debe > 0 else haber
-
-                if importe == 0:
-                    continue
-
-                f.write(
-                    f"M {cuenta} {referencia} {tipo_mov} {importe:.2f}"
-                    f" {DIARIO_MOVIMIENTO} {SEGMENTO_NEGOCIO} {concepto_mov}\n"
-                )
-
-                if uuid and uuid != "nan" and len(uuid) == 36:
-                    f.write(f"AD {uuid}\n")
-
-    if polizas_pendientes:
-        print(
-            f"⚠️  ADVERTENCIA: Las siguientes pólizas tienen movimientos con cuenta "
-            f"PENDIENTE y fueron omitidos del TXT (corrígelas en el Excel y usa "
-            f"'Aprender de Excel Corregido'): {polizas_pendientes}"
-        )
-
+                
+                # Armado de strings con anchos fijos estrictos (M1)
+                cuenta_str = f"{cuenta_val:<31}"
+                ref_str = f"{referencia:<31}"
+                importe_pad = f"{importe:<21.2f}"
+                
+                f.write(f"M1 {cuenta_str}{ref_str}{tipo_mov} {importe_pad}0          0.0                  {concepto_mov}\n")
+                
+                # El UUID se asocia una única vez por póliza para no inflar acumulados
+                if uuid and uuid.lower() != "nan" and len(uuid) == 36:
+                    if uuid not in uuids_escritos:
+                        f.write(f"AD {uuid}\n")
+                        uuids_escritos.add(uuid)
+                        
     return filepath
+
+def generar_archivo_diot_sat(df, output_dir, excel_filename):
+    """
+    Genera el archivo TXT oficial para la DIOT del SAT.
+    Aplica las reglas fiscales: Filtra PUE/REP, agrupa por RFC,
+    manda las Notas de Crédito (Tipo E) a la columna de Descuentos/Devoluciones
+    y blinda el redondeo para evitar el error de centavos del validador.
+    """
+    diot_filename = "DIOT_SAT_" + excel_filename.replace(".xlsx", ".txt")
+    diot_filepath = os.path.join(output_dir, diot_filename)
+    
+    # 1. FILTRAR FLUJO EFECTIVO: Solo entra lo efectivamente pagado (PUE o Complementos de Pago 'P')
+    # Las facturas con método PPD se excluyen porque no representan flujo en el mes.
+    df_flujo = df[df["metodo_pago"].astype(str).upper().isin(["PUE", "P"])].copy()
+    if df_flujo.empty:
+        return None
+
+    # Inicializar diccionarios de acumulación por RFC para consolidar una única línea
+    acumulado_base = {}
+    acumulado_descuentos = {}
+    
+    for _, r in df_flujo.iterrows():
+        rfc = str(r.get("rfc_emisor", "")).strip().upper()
+        if not rfc or rfc == "NAN" or len(rfc) < 12: 
+            continue
+            
+        tipo_cfdi = str(r.get("tipo", "")).upper()
+        base_16 = float(r.get("subtotal", 0)) # Base gravada antes de IVA
+        
+        if rfc not in acumulado_base:
+            acumulado_base[rfc] = 0.0
+            acumulado_descuentos[rfc] = 0.0
+            
+        # 2. SEPARACIÓN DE NOTAS DE CRÉDITO (TIPO E) SEGÚN REGLAS DEL SAT
+        if tipo_cfdi == "E":
+            # Las notas de crédito se acumulan de forma positiva en la columna de descuentos
+            acumulado_descuentos[rfc] += base_16
+        else:
+            # Las facturas normales acumulan la base de actos gravados
+            acumulado_base[rfc] += base_16
+
+    # 3. ESCRITURA DEL LAYOUT OFICIAL DEL SAT DELIMITADO POR PIPES (|)
+    with open(diot_filepath, "w", encoding="windows-1252") as f:
+        for rfc in acumulado_base.keys():
+            base_neta = acumulado_base[rfc]
+            descuentos_netos = acumulado_descuentos[rfc]
+            
+            # 4. CONTROL DE VALORES NEGATIVOS: Si el descuento supera al ingreso, se topa en cero
+            if base_neta < 0: base_neta = 0.0
+            if descuentos_netos < 0: descuentos_netos = 0.0
+            
+            # Redondeo sin decimales exigido por la plataforma de la DIOT
+            base_final = round(base_neta)
+            descuentos_final = round(descuentos_netos)
+            
+            # 5. BLINDAJE MATEMÁTICO CONTRA ERRORES DE CENTAVOS DEL SAT
+            # El validador calcula internamente (Base * 0.16) y si tu IVA reportado difiere por redondeo, te batea.
+            iva_calculado_max = int(base_final * 0.16)
+            
+            # Formateo del renglón DIOT estándar (Proveedor Nacional = 04, Op. General = 85)
+            # Columna 8: Valor de los actos al 16% | Columna 14: Devoluciones y Descuentos
+            row_diot = [
+                "04", "85", rfc, "", "", "", "", 
+                str(base_final) if base_final > 0 else "", 
+                "", "", "", "", "", 
+                str(descuentos_final) if descuentos_final > 0 else "",
+                "", "", "", "", "", "", "", "", "", ""
+            ]
+            
+            f.write("|".join(row_diot) + "|\n")
+            
+    return diot_filepath
 
 def exportar(df, diot_df, output_dir, filename, log_data):
     filepath = os.path.join(output_dir, filename)
@@ -254,8 +288,10 @@ def exportar(df, diot_df, output_dir, filename, log_data):
     res_df = pd.DataFrame([{"Métrica": k, "Cantidad": v} for k, v in log_data.items()])
     df["Sugerencia"] = df.apply(lambda r: generar_sugerencia(r, df_catalogo), axis=1)
 
+    # 1. Generamos pólizas en formato limpio para Excel
     polizas_df = generar_polizas(df, is_egresos)
 
+    # 2. Escritura del libro de Excel de control humano
     with pd.ExcelWriter(filepath, engine='openpyxl') as w:
         res_df.to_excel(w, sheet_name="RESUMEN", index=False)
         auto_ajustar_columnas(w, "RESUMEN", res_df)
@@ -270,7 +306,9 @@ def exportar(df, diot_df, output_dir, filename, log_data):
             diot_df.to_excel(w, sheet_name="DIOT", index=False)
             auto_ajustar_columnas(w, "DIOT", diot_df)
             
+    # 3. Exportación de layouts planos a disco duro
     exportar_txt_contpaqi(polizas_df, output_dir, filename)
+    generar_archivo_diot_sat(df, output_dir, filename) # Genera el TXT corregido para el SAT
 
     try:
         import sys

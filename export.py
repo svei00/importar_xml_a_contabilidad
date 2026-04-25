@@ -1,6 +1,6 @@
 import pandas as pd
 import os
-import math
+import re
 from config import load_settings, cargar_catalogo
 
 def generar_polizas(df, is_egresos):
@@ -14,8 +14,9 @@ def generar_polizas(df, is_egresos):
     c_banco = cuentas.get("bancos", "10201000")
     c_iva_pagado = cuentas.get("iva_acreditable", "11801000")
     c_iva_pdte_pago = cuentas.get("iva_pdte_pago", "11901000") 
-    c_proveedores = cuentas.get("proveedores", "20101000")
-    c_clientes = cuentas.get("clientes", "10501000")
+    # FIX: Se cambia cuenta de mayor 20101000 por cuenta afectable 20101999 por defecto
+    c_proveedores = cuentas.get("proveedores", "20101999") 
+    c_clientes = cuentas.get("clientes", "10501001")
     c_ventas = cuentas.get("ventas", "40101000")
     c_iva_cobrado = cuentas.get("iva_trasladado", "20801000")
     c_iva_pdte_cobro = cuentas.get("iva_pdte_cobro", "20901000")
@@ -31,9 +32,7 @@ def generar_polizas(df, is_egresos):
         uuid = str(r["uuid"]).strip()
         concepto = str(r["concepto"])[:50]
         
-        # =====================================================================
-        # LÓGICA DE REFERENCIA (Nombre_Serie-Folio)
-        # =====================================================================
+        # Referencia (Max 30 chars, espacios permitidos por el ancho fijo de CONTPAQi)
         ref_base = str(r.get("referencia", "")).strip()
         if not ref_base or ref_base.lower() == "nan": ref_base = "SR"
         
@@ -141,16 +140,16 @@ def auto_ajustar_columnas(writer, sheet_name, df):
         max_len = max(df[col].astype(str).map(len).max(), len(str(col))) + 2
         col_letter = __import__('openpyxl').utils.get_column_letter(i + 1)
         worksheet.column_dimensions[col_letter].width = min(max_len, 50)
+        
         for cell in worksheet[col_letter]:
             if col in ["Cuenta", "Referencia", "Fecha"]:
                 cell.number_format = '@'
 
 def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
-    """Genera el archivo de pólizas imitando perfectamente el Ancho Fijo nativo del sistema."""
-    txt_filename = excel_filename.replace(".xlsx", ".txt")
+    """Generador TXT Estricto para CONTPAQi (Formato Tabular de Ancho Fijo)"""
+    txt_filename = "Polizas_CONTPAQi_" + excel_filename.replace(".xlsx", ".txt")
     filepath = os.path.join(output_dir, txt_filename)
     
-    # IMPORTANTE: Forzamos codificación windows-1252 (ANSI) para conservar el ancho exacto por byte
     with open(filepath, "w", encoding="windows-1252", errors="replace") as f:
         for num, group in polizas_df.groupby("Numero"):
             primera_fila = group.iloc[0]
@@ -166,11 +165,8 @@ def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
             concepto_poliza = str(primera_fila["Concepto"])[:100].strip()
             if not concepto_poliza: concepto_poliza = "Sin Concepto"
             
-            # Formato de línea P replicado al espacio exacto del archivo nativo
-            f.write(f"P  {fecha_str}    {tipo_int}         {num:<2}1 0          {concepto_poliza}\n")
-            
-            # Control de duplicidad de UUID en el ADD para la DIOT interna de CONTPAQi
-            uuids_escritos = set()
+            # FIX: Cabecera P sin GUID interno falso. Termina exactamente en 11 0 0
+            f.write(f"P  {fecha_str}    {tipo_int}         {num:<2}1 0          {concepto_poliza:<100} 11 0 0 \n")
             
             for _, r in group.iterrows():
                 cuenta_val = str(r["Cuenta"]).strip()
@@ -187,43 +183,48 @@ def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
                 if debe == 0 and haber == 0: continue 
                 
                 concepto_mov = str(r["Concepto"])[:100].strip()
-                uuid = str(r["UUID"]).strip()
+                uuid_mov = str(r["UUID"]).strip().upper()
                 
                 tipo_mov = "0" if debe > 0 else "1"
                 importe = debe if debe > 0 else haber
                 
-                # Armado de strings con anchos fijos estrictos (M1)
-                cuenta_str = f"{cuenta_val:<31}"
+                cuenta_str = f"{cuenta_val:<30}"
                 ref_str = f"{referencia:<31}"
-                importe_pad = f"{importe:<21.2f}"
+                importe_str = f"{importe:.2f}"
+                importe_pad = f"{importe_str:<21}"
                 
-                f.write(f"M1 {cuenta_str}{ref_str}{tipo_mov} {importe_pad}0          0.0                  {concepto_mov}\n")
+                # FIX: M1 termina en el concepto, sin inyectar GUID falso
+                f.write(f"M1 {cuenta_str}{ref_str}{tipo_mov} {importe_pad}0          0.0                  {concepto_mov:<106}\n")
                 
-                # El UUID se asocia una única vez por póliza para no inflar acumulados
-                if uuid and uuid.lower() != "nan" and len(uuid) == 36:
-                    if uuid not in uuids_escritos:
-                        f.write(f"AD {uuid}\n")
-                        uuids_escritos.add(uuid)
+                # FIX: El UUID va exclusivamente en la asociación digital (AD)
+                if len(uuid_mov) == 36:
+                    f.write(f"AD {uuid_mov}\n")
                         
     return filepath
 
 def generar_archivo_diot_sat(df, output_dir, excel_filename):
     """
-    Genera el archivo TXT oficial para la DIOT del SAT.
-    Aplica las reglas fiscales: Filtra PUE/REP, agrupa por RFC,
-    manda las Notas de Crédito (Tipo E) a la columna de Descuentos/Devoluciones
-    y blinda el redondeo para evitar el error de centavos del validador.
+    Genera el archivo TXT Batch de la DIOT oficial del SAT.
+    Extrae dinámicamente el mes y el año del nombre del archivo.
     """
-    diot_filename = "DIOT_SAT_" + excel_filename.replace(".xlsx", ".txt")
+    import re
+    meses = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+    match = re.search(r'_(\d{4})_(\d{2})', excel_filename)
+    if match:
+        year = match.group(1)
+        month_num = int(match.group(2))
+        month_str = meses[month_num - 1]
+        diot_filename = f"{month_num:02d}. {month_str} {year} N DIOT.txt"
+    else:
+        diot_filename = "DIOT_SAT_Fallback.txt"
+        
     diot_filepath = os.path.join(output_dir, diot_filename)
     
-    # 1. FILTRAR FLUJO EFECTIVO: Solo entra lo efectivamente pagado (PUE o Complementos de Pago 'P')
-    # Las facturas con método PPD se excluyen porque no representan flujo en el mes.
-    df_flujo = df[df["metodo_pago"].astype(str).upper().isin(["PUE", "P"])].copy()
+    # Filtro estricto: PUE, REPs (P) y Egresos (Notas de Crédito E)
+    df_flujo = df[(df["metodo_pago"].astype(str).str.upper().isin(["PUE", "P"])) | (df["tipo"].astype(str).str.upper() == "E")].copy()
     if df_flujo.empty:
         return None
 
-    # Inicializar diccionarios de acumulación por RFC para consolidar una única línea
     acumulado_base = {}
     acumulado_descuentos = {}
     
@@ -233,49 +234,49 @@ def generar_archivo_diot_sat(df, output_dir, excel_filename):
             continue
             
         tipo_cfdi = str(r.get("tipo", "")).upper()
-        base_16 = float(r.get("subtotal", 0)) # Base gravada antes de IVA
+        base_16 = float(r.get("subtotal", 0)) 
         
         if rfc not in acumulado_base:
             acumulado_base[rfc] = 0.0
             acumulado_descuentos[rfc] = 0.0
             
-        # 2. SEPARACIÓN DE NOTAS DE CRÉDITO (TIPO E) SEGÚN REGLAS DEL SAT
         if tipo_cfdi == "E":
-            # Las notas de crédito se acumulan de forma positiva en la columna de descuentos
             acumulado_descuentos[rfc] += base_16
         else:
-            # Las facturas normales acumulan la base de actos gravados
             acumulado_base[rfc] += base_16
 
-    # 3. ESCRITURA DEL LAYOUT OFICIAL DEL SAT DELIMITADO POR PIPES (|)
     with open(diot_filepath, "w", encoding="windows-1252") as f:
         for rfc in acumulado_base.keys():
-            base_neta = acumulado_base[rfc]
-            descuentos_netos = acumulado_descuentos[rfc]
+            base = round(acumulado_base[rfc])
+            desc = round(acumulado_descuentos[rfc])
             
-            # 4. CONTROL DE VALORES NEGATIVOS: Si el descuento supera al ingreso, se topa en cero
-            if base_neta < 0: base_neta = 0.0
-            if descuentos_netos < 0: descuentos_netos = 0.0
+            if base < 0: base = 0
+            if desc < 0: desc = 0
             
-            # Redondeo sin decimales exigido por la plataforma de la DIOT
-            base_final = round(base_neta)
-            descuentos_final = round(descuentos_netos)
+            if base == 0 and desc == 0:
+                continue
+                
+            base_neta = base - desc
+            if base_neta < 0: base_neta = 0
+            iva_acreditable = round(base_neta * 0.16)
             
-            # 5. BLINDAJE MATEMÁTICO CONTRA ERRORES DE CENTAVOS DEL SAT
-            # El validador calcula internamente (Base * 0.16) y si tu IVA reportado difiere por redondeo, te batea.
-            iva_calculado_max = int(base_final * 0.16)
+            # Array de 55 elementos genera exactamente los 54 pipes requeridos
+            row = [""] * 55 
+            row[0] = "04"  
+            row[1] = "85"  
+            row[2] = rfc   
             
-            # Formateo del renglón DIOT estándar (Proveedor Nacional = 04, Op. General = 85)
-            # Columna 8: Valor de los actos al 16% | Columna 14: Devoluciones y Descuentos
-            row_diot = [
-                "04", "85", rfc, "", "", "", "", 
-                str(base_final) if base_final > 0 else "", 
-                "", "", "", "", "", 
-                str(descuentos_final) if descuentos_final > 0 else "",
-                "", "", "", "", "", "", "", "", "", ""
-            ]
+            # Asignación exacta según la plantilla que compartiste
+            if base > 0:
+                row[11] = str(base)              # Valor de actos o actividades pagadas
+            if desc > 0:
+                row[12] = str(desc)              # Devoluciones, descuentos y bonificaciones
+            if iva_acreditable > 0:
+                row[21] = str(iva_acreditable)   # IVA pagado (Neto)
+                
+            row[54] = "01" 
             
-            f.write("|".join(row_diot) + "|\n")
+            f.write("|".join(row) + "\n")
             
     return diot_filepath
 
@@ -288,10 +289,8 @@ def exportar(df, diot_df, output_dir, filename, log_data):
     res_df = pd.DataFrame([{"Métrica": k, "Cantidad": v} for k, v in log_data.items()])
     df["Sugerencia"] = df.apply(lambda r: generar_sugerencia(r, df_catalogo), axis=1)
 
-    # 1. Generamos pólizas en formato limpio para Excel
     polizas_df = generar_polizas(df, is_egresos)
 
-    # 2. Escritura del libro de Excel de control humano
     with pd.ExcelWriter(filepath, engine='openpyxl') as w:
         res_df.to_excel(w, sheet_name="RESUMEN", index=False)
         auto_ajustar_columnas(w, "RESUMEN", res_df)
@@ -301,14 +300,10 @@ def exportar(df, diot_df, output_dir, filename, log_data):
         
         polizas_df.to_excel(w, sheet_name="POLIZAS_CONTPAQI", index=False)
         auto_ajustar_columnas(w, "POLIZAS_CONTPAQI", polizas_df)
-        
-        if diot_df is not None and not diot_df.empty:
-            diot_df.to_excel(w, sheet_name="DIOT", index=False)
-            auto_ajustar_columnas(w, "DIOT", diot_df)
             
-    # 3. Exportación de layouts planos a disco duro
+    # Exportación final orquestada: Lanza Pólizas y Lanza DIOT
     exportar_txt_contpaqi(polizas_df, output_dir, filename)
-    generar_archivo_diot_sat(df, output_dir, filename) # Genera el TXT corregido para el SAT
+    generar_archivo_diot_sat(df, output_dir, filename)
 
     try:
         import sys

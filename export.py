@@ -205,23 +205,46 @@ def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
 def generar_archivo_diot_sat(df, output_dir, excel_filename):
     """
     Genera el archivo TXT Batch de la DIOT oficial del SAT.
-    Extrae dinámicamente el mes y el año del nombre del archivo.
+    Escanea la carpeta para generar el archivo Normal (con ALT+255) o la Complementaria Cxx.
+    Filtra ingresos, suma REPs, y agrupa las Notas de Crédito/Descuentos.
     """
     import re
+    import os
+    
     meses = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
     match = re.search(r'_(\d{4})_(\d{2})', excel_filename)
     if match:
         year = match.group(1)
         month_num = int(match.group(2))
         month_str = meses[month_num - 1]
-        diot_filename = f"{month_num:02d}. {month_str} {year} N DIOT.txt"
+        base_name = f"{month_num:02d}. {month_str} {year}"
+        
+        # El carácter chr(255) es el famoso ALT+255 que usa CONTPAQi para su archivo Normal
+        n_filename = f"{base_name} {chr(255)}N DIOT.txt"
+        
+        # Lógica de Contador Automático de Complementarias
+        if not os.path.exists(os.path.join(output_dir, n_filename)):
+            diot_filename = n_filename
+        else:
+            counter = 1
+            while True:
+                c_filename = f"{base_name} C{counter} DIOT.txt"
+                if not os.path.exists(os.path.join(output_dir, c_filename)):
+                    diot_filename = c_filename
+                    break
+                counter += 1
     else:
         diot_filename = "DIOT_SAT_Fallback.txt"
         
     diot_filepath = os.path.join(output_dir, diot_filename)
     
-    # Filtro estricto: PUE, REPs (P) y Egresos (Notas de Crédito E)
-    df_flujo = df[(df["metodo_pago"].astype(str).str.upper().isin(["PUE", "P"])) | (df["tipo"].astype(str).str.upper() == "E")].copy()
+    # Filtro estricto: PUE (Ingresos directos), P (Pagos/REPs) y E (Notas de Crédito)
+    df_flujo = df[
+        (df["metodo_pago"].astype(str).str.upper() == "PUE") | 
+        (df["tipo"].astype(str).str.upper() == "P") | 
+        (df["tipo"].astype(str).str.upper() == "E")
+    ].copy()
+    
     if df_flujo.empty:
         return None
 
@@ -236,37 +259,45 @@ def generar_archivo_diot_sat(df, output_dir, excel_filename):
         tipo_cfdi = str(r.get("tipo", "")).upper()
         base_16 = float(r.get("subtotal", 0)) 
         
+        # Extraemos el descuento si viene en una factura normal (I)
+        descuento_cfdi = float(r.get("descuento", 0)) if "descuento" in r else 0.0
+        
         if rfc not in acumulado_base:
             acumulado_base[rfc] = 0.0
             acumulado_descuentos[rfc] = 0.0
             
+        # Separación: Todo Egreso se va directo a acumular en la columna de descuentos
         if tipo_cfdi == "E":
             acumulado_descuentos[rfc] += base_16
         else:
             acumulado_base[rfc] += base_16
+            acumulado_descuentos[rfc] += descuento_cfdi
 
     with open(diot_filepath, "w", encoding="windows-1252") as f:
         for rfc in acumulado_base.keys():
             base = round(acumulado_base[rfc])
             desc = round(acumulado_descuentos[rfc])
             
+            # El validador SAT no acepta valores negativos bajo ninguna circunstancia
             if base < 0: base = 0
             if desc < 0: desc = 0
             
+            # Si el proveedor no generó flujo neto, se omite de la declaración
             if base == 0 and desc == 0:
                 continue
                 
+            # BLINDAJE MATEMÁTICO: Calcula el IVA neto exacto después del descuento para evitar error de SAT
             base_neta = base - desc
             if base_neta < 0: base_neta = 0
             iva_acreditable = round(base_neta * 0.16)
             
-            # Array de 55 elementos genera exactamente los 54 pipes requeridos
+            # Array de 55 elementos genera exactamente los 54 pipes (|) requeridos
             row = [""] * 55 
-            row[0] = "04"  
-            row[1] = "85"  
-            row[2] = rfc   
+            row[0] = "04"  # Tipo de Tercero
+            row[1] = "85"  # Tipo de Operación
+            row[2] = rfc   # RFC
             
-            # Asignación exacta según la plantilla que compartiste
+            # Asignación de índices milimétrica de tu layout
             if base > 0:
                 row[11] = str(base)              # Valor de actos o actividades pagadas
             if desc > 0:
@@ -274,7 +305,7 @@ def generar_archivo_diot_sat(df, output_dir, excel_filename):
             if iva_acreditable > 0:
                 row[21] = str(iva_acreditable)   # IVA pagado (Neto)
                 
-            row[54] = "01" 
+            row[54] = "01" # Cierre de línea estándar
             
             f.write("|".join(row) + "\n")
             

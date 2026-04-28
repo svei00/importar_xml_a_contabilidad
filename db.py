@@ -34,6 +34,14 @@ def init_db(rfc):
         PRIMARY KEY (mes, anio)
     )
     """)
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS alias_terceros (
+        rfc TEXT PRIMARY KEY,
+        shortname TEXT,
+        nombre_oficial TEXT,
+        actualizado TEXT
+    )
+    """)
     conn.commit()
     conn.close()
 
@@ -67,6 +75,69 @@ def get_training_data(rfc):
     finally:
         conn.close()
     return df
+
+# ---------------------------------------------------------------------------
+# Alias de terceros (RFC -> apodo corto) para la Referencia de pólizas.
+# Se guardan en la BD de CADA empresa (empresas/<RFC_EMPRESA>/conta_ml.db).
+# ---------------------------------------------------------------------------
+def _ensure_alias_table(c):
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS alias_terceros (
+        rfc TEXT PRIMARY KEY, shortname TEXT, nombre_oficial TEXT, actualizado TEXT
+    )""")
+
+def ensure_alias(empresa_rfc, tercero_rfc, nombre_oficial, default_short):
+    """Inserta el alias por defecto solo si el RFC del tercero aún no existe."""
+    tercero_rfc = str(tercero_rfc).strip().upper()
+    if not tercero_rfc or tercero_rfc == "NAN" or len(tercero_rfc) < 12:
+        return
+    import datetime
+    conn = get_conn(empresa_rfc); c = conn.cursor()
+    _ensure_alias_table(c)
+    c.execute("SELECT rfc FROM alias_terceros WHERE rfc=?", (tercero_rfc,))
+    if c.fetchone() is None:
+        c.execute("INSERT INTO alias_terceros VALUES (?,?,?,?)",
+                  (tercero_rfc, default_short, str(nombre_oficial)[:200],
+                   datetime.date.today().isoformat()))
+    conn.commit(); conn.close()
+
+def set_alias(empresa_rfc, tercero_rfc, shortname):
+    """Guarda/actualiza el apodo elegido por el usuario."""
+    import datetime
+    tercero_rfc = str(tercero_rfc).strip().upper()
+    conn = get_conn(empresa_rfc); c = conn.cursor()
+    _ensure_alias_table(c)
+    c.execute("""INSERT INTO alias_terceros (rfc, shortname, actualizado) VALUES (?,?,?)
+                 ON CONFLICT(rfc) DO UPDATE SET shortname=excluded.shortname,
+                 actualizado=excluded.actualizado""",
+              (tercero_rfc, shortname, datetime.date.today().isoformat()))
+    conn.commit(); conn.close()
+
+def get_aliases(empresa_rfc):
+    """Devuelve {rfc: shortname} para construir las Referencias."""
+    conn = get_conn(empresa_rfc); c = conn.cursor()
+    _ensure_alias_table(c)
+    c.execute("SELECT rfc, shortname FROM alias_terceros")
+    data = {r[0]: r[1] for r in c.fetchall() if r[1]}
+    conn.close()
+    return data
+
+def get_aliases_full(empresa_rfc):
+    """Devuelve [(rfc, shortname, nombre_oficial)] ordenado, para la GUI."""
+    conn = get_conn(empresa_rfc); c = conn.cursor()
+    _ensure_alias_table(c)
+    c.execute("SELECT rfc, shortname, nombre_oficial FROM alias_terceros ORDER BY nombre_oficial")
+    data = c.fetchall()
+    conn.close()
+    return data
+
+def list_empresas():
+    """Lista los RFC de empresa que ya tienen base de datos."""
+    base = "empresas"
+    if not os.path.exists(base):
+        return []
+    return sorted(d for d in os.listdir(base)
+                  if os.path.exists(os.path.join(base, d, "conta_ml.db")))
 
 def get_tipo_diot_automatico(rfc, mes, anio):
     conn = get_conn(rfc)

@@ -205,6 +205,82 @@ def crear_boton(parent, text, bg, hover, command):
     btn.bind("<Leave>", lambda e: e.widget.config(bg=bg))
     return btn
 
+def administrar_alias_ui():
+    """Ventana para que el usuario edite el apodo (shortname) de cada tercero.
+    La Referencia de las pólizas será  RFC-APODO  (consistente y filtrable)."""
+    from tkinter import ttk
+    from db import get_aliases_full, set_alias, list_empresas
+    from terceros import limpiar_shortname, normalizar_shortname, construir_referencia
+
+    empresas = list_empresas()
+    if not empresas:
+        messagebox.showinfo("Sin empresas",
+                            "Aún no hay empresas procesadas.\nProcesa un lote de XML primero "
+                            "para que se llenen los terceros.")
+        return
+
+    win = tk.Toplevel()
+    win.title("Administrar Alias de Terceros")
+    win.geometry("780x540")
+    win.configure(bg="#1E1E2E")
+
+    top = Frame(win, bg="#1E1E2E", padx=12, pady=10); top.pack(fill="x")
+    Label(top, text="Empresa:", bg="#1E1E2E", fg="#CDD6F4",
+          font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+    combo = ttk.Combobox(top, values=empresas, state="readonly", width=24)
+    combo.pack(side=tk.LEFT, padx=8); combo.current(0)
+    Label(win, text="La Referencia de cada póliza será  RFC-APODO  (sin espacios, máx 30 caracteres).",
+          bg="#1E1E2E", fg="#A6ADC8", font=("Segoe UI", 9)).pack(anchor="w", padx=12)
+
+    cols = ("rfc", "nombre", "apodo", "ref")
+    tree = ttk.Treeview(win, columns=cols, show="headings", height=15)
+    for c, txt, w in [("rfc", "RFC", 130), ("nombre", "Nombre oficial", 250),
+                      ("apodo", "Apodo", 120), ("ref", "Referencia resultante", 250)]:
+        tree.heading(c, text=txt); tree.column(c, width=w, anchor="w")
+    tree.pack(fill="both", expand=True, padx=12, pady=8)
+
+    edit = Frame(win, bg="#1E1E2E", padx=12, pady=8); edit.pack(fill="x")
+    Label(edit, text="Apodo:", bg="#1E1E2E", fg="#CDD6F4").pack(side=tk.LEFT)
+    var = tk.StringVar()
+    tk.Entry(edit, textvariable=var, width=20, font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=6)
+    prev = Label(edit, text="", bg="#1E1E2E", fg="#A6E3A1", font=("Consolas", 9))
+    prev.pack(side=tk.LEFT, padx=10)
+
+    def cargar():
+        tree.delete(*tree.get_children())
+        for rfc, short, nom in get_aliases_full(combo.get()):
+            ref = construir_referencia(rfc, nom or "", {rfc: short} if short else {})
+            tree.insert("", "end", iid=rfc, values=(rfc, (nom or "")[:40], short or "", ref))
+
+    def actualizar_preview(*_):
+        sel = tree.selection()
+        prev.config(text=(f"->  {sel[0]}-{limpiar_shortname(var.get())}" if sel else ""))
+
+    def on_select(_e=None):
+        sel = tree.selection()
+        if sel:
+            var.set(tree.item(sel[0], "values")[2]); actualizar_preview()
+
+    def guardar():
+        sel = tree.selection()
+        if not sel:
+            messagebox.showinfo("Selecciona", "Elige un tercero de la lista."); return
+        rfc = sel[0]
+        limpio = limpiar_shortname(var.get())
+        if not limpio:
+            messagebox.showwarning("Apodo vacío",
+                                   "El apodo no puede quedar vacío. Escribe algo como LUZ, TELMEX, etc.")
+            return
+        set_alias(combo.get(), rfc, limpio)
+        cargar(); tree.selection_set(rfc); tree.see(rfc)
+
+    crear_boton(edit, "💾 Guardar Apodo", "#38A169", "#2F855A", guardar).pack(side=tk.LEFT, padx=8)
+    var.trace_add("write", actualizar_preview)
+    tree.bind("<<TreeviewSelect>>", on_select)
+    combo.bind("<<ComboboxSelected>>", lambda e: cargar())
+    cargar()
+
+
 def main():
     root = tk.Tk()
     root.title("SAT & ContpaqI Automator AI Pro")
@@ -231,7 +307,8 @@ def main():
     
     Label(left_frame, text="Inteligencia Artificial:", bg=bg_dark, fg=text_color, font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 10))
     crear_boton(left_frame, "🧠 Aprender de Excel Corregido", "#805AD5", "#6B46C1", learn_from_excel_ui).pack(fill="x", pady=5)
-    
+    crear_boton(left_frame, "👥 Administrar Alias de Terceros", "#D69E2E", "#B7791F", administrar_alias_ui).pack(fill="x", pady=5)
+
     Frame(left_frame, bg="#313244", height=1).pack(fill="x", pady=15)
     crear_boton(left_frame, "⚙️ Configurar Carpeta de Salida", "#45475A", "#585B70", set_output_folder).pack(fill="x", pady=5)
 

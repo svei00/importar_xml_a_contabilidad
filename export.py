@@ -2,8 +2,9 @@ import pandas as pd
 import os
 import re
 from config import load_settings, cargar_catalogo
+from terceros import construir_referencia
 
-def generar_polizas(df, is_egresos):
+def generar_polizas(df, is_egresos, aliases=None):
     """
     Toma los datos puros del SAT y genera el árbol de decisiones contables (Debe/Haber).
     Aplica las Normas de Información Financiera (NIF) para provisiones (PPD) y pagos (PUE/REP).
@@ -21,6 +22,7 @@ def generar_polizas(df, is_egresos):
     c_iva_cobrado = cuentas.get("iva_trasladado", "20801000")
     c_iva_pdte_cobro = cuentas.get("iva_pdte_cobro", "20901000")
     
+    aliases = aliases or {}
     pol = []
     num = 1
     df = df.fillna(0)
@@ -31,19 +33,19 @@ def generar_polizas(df, is_egresos):
         metodo = r.get("metodo_pago", "PUE")
         uuid = str(r["uuid"]).strip()
         concepto = str(r["concepto"])[:50]
-        
-        # Referencia (Max 30 chars, espacios permitidos por el ancho fijo de CONTPAQi)
+
+        # Referencia = RFC-SHORTNAME (clave consistente y filtrable en Auxiliares).
+        # El folio de la factura se conserva en el Concepto, no en la Referencia.
         ref_base = str(r.get("referencia", "")).strip()
         if not ref_base or ref_base.lower() == "nan": ref_base = "SR"
-        
+
+        rfc_tercero = str(r.get("rfc_emisor", "")) if is_egresos else str(r.get("rfc_receptor", ""))
         nombre_tercero = str(r.get("nombre_emisor", "")) if is_egresos else str(r.get("nombre_receptor", ""))
         if nombre_tercero.lower() == "nan": nombre_tercero = ""
-        
-        if nombre_tercero:
-            espacio_nombre = 30 - len(ref_base) - 1 
-            nombre_corto = nombre_tercero[:espacio_nombre].strip()
-            ref = f"{nombre_corto} {ref_base}" if ref_base else nombre_corto
-        else:
+
+        ref = construir_referencia(rfc_tercero, nombre_tercero, aliases)
+        if not ref:
+            # Sin RFC válido (p.ej. nómina): se conserva el folio como referencia.
             ref = ref_base[:30]
         
         fecha_limpia = str(r.get("fecha", "2026-01-01")).split("T")[0]
@@ -188,7 +190,11 @@ def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
                 tipo_mov = "0" if debe > 0 else "1"
                 importe = debe if debe > 0 else haber
                 
-                cuenta_str = f"{cuenta_val:<30}"
+                # CONTPAQi lee los importes en columnas FIJAS. La cuenta debe ocupar
+                # 31 caracteres (no 30): con 30 todo se recorre 1 a la izquierda y
+                # CONTPAQi se "come" el primer dígito del importe (3915.00 -> 915.00),
+                # dejando la póliza descuadrada -> cuenta de cuadre / pólizas rechazadas.
+                cuenta_str = f"{cuenta_val:<31}"
                 ref_str = f"{referencia:<31}"
                 importe_str = f"{importe:.2f}"
                 importe_pad = f"{importe_str:<21}"
@@ -312,16 +318,42 @@ def generar_archivo_diot_sat(df, output_dir, excel_filename):
             
     return diot_filepath
 
+def sincronizar_aliases(empresa_rfc, df, is_egresos):
+    """
+    Da de alta (con apodo por defecto) cada tercero nuevo visto en este lote,
+    para que aparezca en el administrador de alias listo para renombrar.
+    Devuelve el diccionario {rfc: shortname} ya vigente.
+    """
+    if not empresa_rfc:
+        return {}
+    from db import ensure_alias, get_aliases
+    from terceros import normalizar_shortname
+    col_rfc = "rfc_emisor" if is_egresos else "rfc_receptor"
+    col_nom = "nombre_emisor" if is_egresos else "nombre_receptor"
+    for _, r in df.iterrows():
+        if str(r.get("tipo", "")) == "N":   # nómina no tiene tercero proveedor
+            continue
+        rfc = str(r.get(col_rfc, "")).strip().upper()
+        nombre = str(r.get(col_nom, ""))
+        ensure_alias(empresa_rfc, rfc, nombre, normalizar_shortname(nombre))
+    return get_aliases(empresa_rfc)
+
 def exportar(df, diot_df, output_dir, filename, log_data):
     filepath = os.path.join(output_dir, filename)
     is_egresos = "EGRESOS" in filename.upper()
     try: df_catalogo = cargar_catalogo()
     except: df_catalogo = None
 
+    # Empresa = 3er segmento del nombre de archivo (Polizas_<TIPO>_<RFC>_<AAAA>_<MM>.xlsx)
+    partes = os.path.basename(filename).split("_")
+    empresa_rfc = partes[2] if len(partes) >= 3 else ""
+    try: aliases = sincronizar_aliases(empresa_rfc, df, is_egresos)
+    except Exception: aliases = {}
+
     res_df = pd.DataFrame([{"Métrica": k, "Cantidad": v} for k, v in log_data.items()])
     df["Sugerencia"] = df.apply(lambda r: generar_sugerencia(r, df_catalogo), axis=1)
 
-    polizas_df = generar_polizas(df, is_egresos)
+    polizas_df = generar_polizas(df, is_egresos, aliases)
 
     with pd.ExcelWriter(filepath, engine='openpyxl') as w:
         res_df.to_excel(w, sheet_name="RESUMEN", index=False)

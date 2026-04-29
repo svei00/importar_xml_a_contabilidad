@@ -60,6 +60,24 @@ def upsert_etiqueta(rfc, uuid, cuenta, centro):
     conn.commit()
     conn.close()
 
+def limpiar_etiquetas(rfc, prefijos_excluir):
+    """Borra etiquetas cuya cuenta empieza con un prefijo no aprendible
+    (banco/IVA/proveedor mal aprendidos en corridas previas). Devuelve cuántas borró."""
+    conn = get_conn(rfc); c = conn.cursor()
+    borradas = 0
+    try:
+        filas = c.execute("SELECT uuid, cuenta FROM etiquetas").fetchall()
+        malas = [u for (u, cta) in filas if str(cta).strip()[:3] in set(prefijos_excluir)]
+        for u in malas:
+            c.execute("DELETE FROM etiquetas WHERE uuid=?", (u,))
+        borradas = len(malas)
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
+    return borradas
+
 def get_training_data(rfc):
     conn = get_conn(rfc)
     df = None

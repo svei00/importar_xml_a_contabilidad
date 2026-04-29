@@ -27,8 +27,9 @@ ANCHO_REFERENCIA = 30
 
 
 def _sin_acentos_mayus(texto):
-    """Mayúsculas, ñ -> NI (evita 'AÑO' -> 'ANO'), y quita los demás acentos."""
-    s = str(texto).upper().replace("Ñ", "NI")
+    """Mayúsculas y quita acentos. Excepción: AÑO -> ANIO (para no escribir 'ANO').
+    Las demás ñ se vuelven N normalmente (Muñoz -> MUNOZ)."""
+    s = str(texto).upper().replace("AÑO", "ANIO")
     s = unicodedata.normalize("NFD", s)
     return "".join(c for c in s if unicodedata.category(c) != "Mn")
 

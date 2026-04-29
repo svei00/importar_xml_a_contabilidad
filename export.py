@@ -32,7 +32,7 @@ def generar_polizas(df, is_egresos, aliases=None):
         rol = "purchase" if is_egresos else "sale"
         metodo = r.get("metodo_pago", "PUE")
         uuid = str(r["uuid"]).strip()
-        concepto = str(r["concepto"])[:50]
+        desc = str(r["concepto"]).strip()
 
         # Referencia = RFC-SHORTNAME (clave consistente y filtrable en Auxiliares).
         # El folio de la factura se conserva en el Concepto, no en la Referencia.
@@ -47,7 +47,15 @@ def generar_polizas(df, is_egresos, aliases=None):
         if not ref:
             # Sin RFC válido (p.ej. nómina): se conserva el folio como referencia.
             ref = ref_base[:30]
-        
+
+        # Concepto del cargo/abono principal: "NOMBRE - descripción" (legible en el
+        # Listado de Pólizas, aunque la descripción del XML sea legalese).
+        concepto = (f"{nombre_tercero} - {desc}".strip(" -") if nombre_tercero else desc)[:100]
+        if not concepto:
+            concepto = "Movimiento"
+        concepto_pago = f"Pago a {nombre_tercero}".strip()[:100] if nombre_tercero else (desc[:100] or "Pago")
+        concepto_cobro = f"Cobro de {nombre_tercero}".strip()[:100] if nombre_tercero else (desc[:100] or "Cobro")
+
         fecha_limpia = str(r.get("fecha", "2026-01-01")).split("T")[0]
         c_asignada = str(r.get("cuenta", "PENDIENTE")).strip()
         c_principal = c_asignada if c_asignada not in ["", "0", "PENDIENTE", "nan"] else "PENDIENTE"
@@ -64,7 +72,7 @@ def generar_polizas(df, is_egresos, aliases=None):
                 prov = str(r["nombre_emisor"])[:50]
                 if metodo == "PPD":
                     pol.append([num, "Diario", fecha_limpia, c_principal, ref, neto, 0, concepto, uuid])
-                    if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_pago, ref, iva, 0, "IVA pendiente", uuid])
+                    if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_pago, ref, iva, 0, "IVA pendiente de pago", uuid])
                     pol.append([num, "Diario", fecha_limpia, c_proveedores, ref, 0, tot, prov, uuid])
                 else:
                     pol.append([num, "Egreso", fecha_limpia, c_principal, ref, neto, 0, concepto, uuid])
@@ -76,7 +84,7 @@ def generar_polizas(df, is_egresos, aliases=None):
                 if metodo == "PPD":
                     pol.append([num, "Diario", fecha_limpia, c_clientes, ref, tot, 0, cli, uuid])
                     pol.append([num, "Diario", fecha_limpia, c_principal, ref, 0, neto, concepto, uuid])
-                    if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_cobro, ref, 0, iva, "IVA Pdte Cobro", uuid])
+                    if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_cobro, ref, 0, iva, "IVA pendiente de cobro", uuid])
                 else:
                     pol.append([num, "Ingreso", fecha_limpia, c_banco, ref, tot, 0, cli, uuid])
                     pol.append([num, "Ingreso", fecha_limpia, c_principal, ref, 0, neto, concepto, uuid])
@@ -87,33 +95,33 @@ def generar_polizas(df, is_egresos, aliases=None):
                 prov = str(r["nombre_emisor"])[:50]
                 pol.append([num, "Diario", fecha_limpia, c_proveedores, ref, tot, 0, f"NC Prov - {prov}", uuid])
                 pol.append([num, "Diario", fecha_limpia, c_principal, ref, 0, neto, concepto, uuid])
-                if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_pago, ref, 0, iva, "Reversión IVA Pdte", uuid])
+                if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_pago, ref, 0, iva, "Reversión IVA pendiente", uuid])
             else:
                 cli = str(r["nombre_receptor"])[:50]
                 pol.append([num, "Diario", fecha_limpia, c_principal, ref, neto, 0, concepto, uuid])
-                if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_cobro, ref, iva, 0, "Reversión IVA Pdte", uuid])
+                if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_cobro, ref, iva, 0, "Reversión IVA pendiente", uuid])
                 pol.append([num, "Diario", fecha_limpia, c_clientes, ref, 0, tot, f"NC Cli - {cli}", uuid])
 
-        elif tipo == "P": 
+        elif tipo == "P":
             if rol == "purchase":
-                pol.append([num, "Egreso", fecha_limpia, c_proveedores, ref, tot, 0, concepto, uuid])
-                pol.append([num, "Egreso", fecha_limpia, c_banco, ref, 0, tot, "Salida a Proveedor", uuid])
+                pol.append([num, "Egreso", fecha_limpia, c_proveedores, ref, tot, 0, concepto_pago, uuid])
+                pol.append([num, "Egreso", fecha_limpia, c_banco, ref, 0, tot, "Pago a proveedor", uuid])
                 if iva > 0:
-                    pol.append([num, "Egreso", fecha_limpia, c_iva_pagado, ref, iva, 0, "Reclasifica IVA Acred", uuid])
-                    pol.append([num, "Egreso", fecha_limpia, c_iva_pdte_pago, ref, 0, iva, "Mata IVA Pdte", uuid])
+                    pol.append([num, "Egreso", fecha_limpia, c_iva_pagado, ref, iva, 0, "Reclasificación IVA acreditable", uuid])
+                    pol.append([num, "Egreso", fecha_limpia, c_iva_pdte_pago, ref, 0, iva, "Cancelación IVA pendiente", uuid])
             else:
-                pol.append([num, "Ingreso", fecha_limpia, c_banco, ref, tot, 0, "Entrada de Cliente", uuid])
-                pol.append([num, "Ingreso", fecha_limpia, c_clientes, ref, 0, tot, concepto, uuid])
+                pol.append([num, "Ingreso", fecha_limpia, c_banco, ref, tot, 0, "Cobro de cliente", uuid])
+                pol.append([num, "Ingreso", fecha_limpia, c_clientes, ref, 0, tot, concepto_cobro, uuid])
                 if iva > 0:
-                    pol.append([num, "Ingreso", fecha_limpia, c_iva_pdte_cobro, ref, iva, 0, "Mata IVA Pdte Cobro", uuid])
-                    pol.append([num, "Ingreso", fecha_limpia, c_iva_cobrado, ref, 0, iva, "Reclasifica IVA Cobrado", uuid])
+                    pol.append([num, "Ingreso", fecha_limpia, c_iva_pdte_cobro, ref, iva, 0, "Cancelación IVA pendiente de cobro", uuid])
+                    pol.append([num, "Ingreso", fecha_limpia, c_iva_cobrado, ref, 0, iva, "Reclasificación IVA trasladado", uuid])
 
         elif tipo == "N": 
             c_nom = cuentas.get("nomina", "60010000")
             c_ret_isr = cuentas.get("retencion_isr", "21601000")
             pol.append([num, "Diario", fecha_limpia, c_nom, ref, float(r["subtotal"]), 0, f"Provisión Nómina {r['departamento']}"[:50], ""])
             if float(r["ret_isr"]) > 0: 
-                pol.append([num, "Diario", fecha_limpia, c_ret_isr, ref, 0, float(r["ret_isr"]), "Ret ISR Nomina", ""])
+                pol.append([num, "Diario", fecha_limpia, c_ret_isr, ref, 0, float(r["ret_isr"]), "Retención ISR nómina", ""])
             pol.append([num, "Diario", fecha_limpia, c_banco, ref, 0, tot, "Neto a Pagar", ""])
             
         num += 1
@@ -210,9 +218,9 @@ def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
 
 def generar_archivo_diot_sat(df, output_dir, excel_filename):
     """
-    Genera el archivo TXT Batch de la DIOT oficial del SAT.
-    Usa dos espacios para el Normal (ej. "03. Mar 2026  N DIOT.txt").
-    Si el N ya existe, escanea la carpeta y genera el C1, C2, etc.
+    [OBSOLETA — YA NO SE LLAMA] Segundo generador de DIOT que duplicaba el archivo.
+    La DIOT oficial se genera ahora SOLO desde diot.py::exportar_txt_sat.
+    Se conserva temporalmente como referencia para la unificación; se eliminará.
     """
     import re
     import os
@@ -365,9 +373,10 @@ def exportar(df, diot_df, output_dir, filename, log_data):
         polizas_df.to_excel(w, sheet_name="POLIZAS_CONTPAQI", index=False)
         auto_ajustar_columnas(w, "POLIZAS_CONTPAQI", polizas_df)
             
-    # Exportación final orquestada: Lanza Pólizas y Lanza DIOT
+    # Solo se genera el TXT de pólizas aquí. La DIOT se produce UNA sola vez
+    # desde diot.py (main.py -> exportar_txt_sat) para no duplicar archivos
+    # con lógicas distintas. (generar_archivo_diot_sat quedó obsoleta.)
     exportar_txt_contpaqi(polizas_df, output_dir, filename)
-    generar_archivo_diot_sat(df, output_dir, filename)
 
     try:
         import sys

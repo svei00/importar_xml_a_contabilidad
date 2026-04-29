@@ -4,7 +4,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, Frame, Button, Label, Text, Scrollbar
 import pandas as pd
 
-from db import init_db, upsert_factura, upsert_etiqueta, get_training_data, get_tipo_diot_automatico
+from db import init_db, upsert_factura, upsert_etiqueta, get_training_data, get_tipo_diot_automatico, limpiar_etiquetas
 from xml_processor import load_folder, es_pago
 from sat_validator import validar
 from ml_model import train, predict
@@ -75,7 +75,7 @@ def process_folder(folder_path, tipo_operacion):
             print(f"   🚨 ALERTA: CFDI Cancelado -> {r['uuid']}")
 
         if r["tipo"] != "N":
-            cuenta = predict(r["concepto"], r["nombre_emisor"], r["cp"]) or cuentas_def.get("gastos_generales", "60000000")
+            cuenta = predict(r["concepto"], r["nombre_emisor"], r["cp"], empresa_rfc) or cuentas_def.get("gastos_generales", "60000000")
             r["cuenta"] = cuenta
 
         r["nota"] = validar_cuenta_vs_sat(r["cuenta"], df_catalogo)
@@ -99,7 +99,7 @@ def process_folder(folder_path, tipo_operacion):
     try:
         train_data = get_training_data(empresa_rfc)
         if train_data is not None and len(train_data) > 1:
-            train(train_data)
+            train(train_data, empresa_rfc)
     except Exception:
         pass
 
@@ -139,21 +139,48 @@ def learn_from_excel_ui():
         xls = pd.ExcelFile(filepath)
         sheet_to_use = "POLIZAS_CONTPAQI" if "POLIZAS_CONTPAQI" in xls.sheet_names else xls.sheet_names[0]
         df_polizas = pd.read_excel(xls, sheet_name=sheet_to_use)
-        
-        # 1. ENTRENAR A LA IA CON LOS GASTOS
-        df_gastos = df_polizas[~df_polizas["Concepto"].isin(["IVA 16%", "Acreedor/Banco", "IEPS", "IVA pendiente", "IVA acreditable", "IVA acreditable pagado", "IVA Cobrado", "IVA Pdte Cobro"])]
+
+        # 1. ENTRENAR A LA IA — UNA cuenta principal por póliza (UUID).
+        # Cada póliza tiene varios movimientos con el MISMO UUID (gasto, IVA, banco).
+        # Hay que aprender SOLO la cuenta de gasto/activo, nunca el banco/IVA/proveedor,
+        # o el modelo memoriza basura (era el bug de "no aprende nada").
+        cuentas_def = load_settings().get("cuentas_default", {})
+        prefijos_excluir = {"101", "102", "105", "118", "119", "201", "205", "208", "209"}
+        for k in ("bancos", "iva_acreditable", "iva_pdte_pago", "proveedores",
+                  "clientes", "iva_trasladado", "iva_pdte_cobro"):
+            v = str(cuentas_def.get(k, "")).strip()
+            if len(v) >= 3:
+                prefijos_excluir.add(v[:3])
+
+        def es_aprendible(cuenta):
+            c = str(cuenta).strip()
+            return c[:3] not in prefijos_excluir and c.replace("-", "").isdigit()
+
+        df_polizas["Cuenta"] = df_polizas["Cuenta"].astype(str)
+        df_polizas["Debe"] = pd.to_numeric(df_polizas.get("Debe"), errors="coerce").fillna(0)
+        df_polizas["Haber"] = pd.to_numeric(df_polizas.get("Haber"), errors="coerce").fillna(0)
 
         count = 0
-        for _, r in df_gastos.iterrows():
-            uuid = str(r.get("UUID", "")).strip()
-            cuenta = str(r.get("Cuenta", "")).strip()
-            if uuid and uuid != "nan":
-                upsert_etiqueta(rfc, uuid, cuenta, "") 
-                count += 1
+        for uuid, grupo in df_polizas.groupby("UUID"):
+            uuid = str(uuid).strip()
+            if not uuid or uuid.lower() == "nan":
+                continue
+            cand = grupo[grupo["Cuenta"].apply(es_aprendible)].copy()
+            if cand.empty:           # p.ej. un REP (puro banco/IVA/proveedor): no se aprende
+                continue
+            cand["monto"] = cand["Debe"] + cand["Haber"]
+            cuenta = str(cand.sort_values("monto", ascending=False).iloc[0]["Cuenta"]).strip()
+            upsert_etiqueta(rfc, uuid, cuenta, "")
+            count += 1
+
+        # Sana etiquetas corruptas de corridas anteriores (banco/IVA/proveedor mal aprendidas)
+        purgadas = limpiar_etiquetas(rfc, sorted(prefijos_excluir))
 
         train_data = get_training_data(rfc)
-        if train_data is not None and len(train_data) > 1: train(train_data)
-        print(f"✅ ¡IA actualizada! Memorizó {count} cuentas.")
+        if train_data is not None and len(train_data) > 1:
+            train(train_data, rfc)
+        print(f"✅ ¡IA actualizada! Aprendió {count} cuentas principales "
+              f"(se descartaron {purgadas} etiquetas inválidas).")
         
         # 2. LA MAGIA: REGENERAR EL ARCHIVO TXT CON LAS CORRECCIONES
         print(f"🔄 Regenerando archivo TXT para CONTPAQi con los nuevos cambios...")

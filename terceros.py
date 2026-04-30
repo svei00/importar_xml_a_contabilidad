@@ -49,6 +49,33 @@ def normalizar_shortname(nombre, max_len=MAX_SHORTNAME):
     return base[:max_len]
 
 
+# Partículas que van en minúscula dentro de un nombre propio en español.
+_PARTICULAS = {"DE", "DEL", "LA", "LAS", "LOS", "Y", "E", "EN", "A"}
+# Siglas de forma legal que conservan MAYÚSCULAS (se ven raras capitalizadas).
+_SIGLAS_LEGAL = {"SA", "CV", "SAB", "RL", "SC", "SAPI", "SOFOM", "ENR", "SADECV"}
+
+
+def titulo(texto):
+    """Title Case en español para mostrar nombres que el XML trae EN MAYÚSCULAS.
+    - Partículas (de, la, los, y…) en minúscula salvo si abren el nombre.
+    - Siglas legales (SA, CV, RL…) se quedan en MAYÚSCULAS.
+    - El RFC NO pasa por aquí: es una clave fiscal y va en mayúsculas."""
+    s = str(texto).strip()
+    if not s or s.lower() == "nan":
+        return ""
+    palabras = s.split()
+    out = []
+    for i, w in enumerate(palabras):
+        clave = re.sub(r"[^A-ZÁÉÍÓÚÑ]", "", w.upper())
+        if clave in _SIGLAS_LEGAL:
+            out.append(w.upper())
+        elif clave in _PARTICULAS and i != 0:
+            out.append(w.lower())
+        else:
+            out.append(w.capitalize())
+    return " ".join(out)
+
+
 def construir_referencia(rfc, nombre, aliases=None):
     """
     Devuelve 'RFC-SHORTNAME' (<= 30 chars). Si no hay RFC válido devuelve ""

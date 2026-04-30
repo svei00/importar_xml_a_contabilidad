@@ -2,7 +2,7 @@ import pandas as pd
 import os
 import re
 from config import load_settings, cargar_catalogo
-from terceros import construir_referencia
+from terceros import construir_referencia, titulo
 
 def generar_polizas(df, is_egresos, aliases=None):
     """
@@ -22,12 +22,21 @@ def generar_polizas(df, is_egresos, aliases=None):
     c_iva_cobrado = cuentas.get("iva_trasladado", "20801000")
     c_iva_pdte_cobro = cuentas.get("iva_pdte_cobro", "20901000")
 
+    # Retenciones por pagar (configurables: cada empresa tiene su propio COA).
+    # En compras a proveedores que retienen: ISR servicios prof. + IVA retenido.
+    c_ret_isr_hon = cuentas.get("ret_isr_honorarios", "21604000")
+    c_ret_iva = cuentas.get("ret_iva", "21610000")
+
     # IEPS acreditable (toggle). Por defecto OFF: el IEPS se queda en el costo
     # (correcto para un contribuyente NO sujeto a IEPS). Si se activa y hay cuenta
     # configurada, el IEPS se separa del neto y se lleva a su propia cuenta
     # acreditable en compras PUE. Ver [[importar-xml-contpaqi]].
     c_ieps = str(cuentas.get("ieps_acreditable", "")).strip()
     ieps_activo = bool(settings.get("acredita_ieps", False)) and c_ieps not in ("", "0")
+
+    # Modo de nómina: "contpaqi" (default) = NO generamos póliza de nómina porque
+    # CONTPAQi Nóminas ya la produce; "xml" = la armamos desde el CFDI de nómina.
+    nomina_modo = str(settings.get("nomina_modo", "contpaqi")).lower()
 
     aliases = aliases or {}
     pol = []
@@ -49,6 +58,9 @@ def generar_polizas(df, is_egresos, aliases=None):
         rfc_tercero = str(r.get("rfc_emisor", "")) if is_egresos else str(r.get("rfc_receptor", ""))
         nombre_tercero = str(r.get("nombre_emisor", "")) if is_egresos else str(r.get("nombre_receptor", ""))
         if nombre_tercero.lower() == "nan": nombre_tercero = ""
+        # El XML trae los nombres en MAYÚSCULAS; se muestran en Title Case (menos
+        # ruido visual en el Listado de Pólizas). El RFC se queda en mayúsculas.
+        nombre_tercero = titulo(nombre_tercero)
 
         ref = construir_referencia(rfc_tercero, nombre_tercero, aliases)
         if not ref:
@@ -70,17 +82,21 @@ def generar_polizas(df, is_egresos, aliases=None):
         # Matemática de Impuestos NIF
         tot = float(r["total"])
         iva = float(r["iva_16"]) + float(r["iva_8"])
-        ret = float(r["ret_iva"]) + float(r["ret_isr"])
+        ret_isr_v = float(r["ret_isr"])
+        ret_iva_v = float(r["ret_iva"])
+        ret = ret_iva_v + ret_isr_v
         ieps = float(r.get("ieps", 0) or 0)
-        neto = round(tot - iva + ret, 2)
+        neto = round(tot - iva + ret, 2)   # = subtotal (la retención se acredita aparte)
         
         # Asientos Contables Automatizados
         if tipo == "I": 
             if rol == "purchase":
-                prov = str(r["nombre_emisor"])[:50]
+                prov = nombre_tercero[:50]
                 if metodo == "PPD":
                     pol.append([num, "Diario", fecha_limpia, c_principal, ref, neto, 0, concepto, uuid])
                     if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_pago, ref, iva, 0, "IVA pendiente de pago", uuid])
+                    if ret_isr_v > 0: pol.append([num, "Diario", fecha_limpia, c_ret_isr_hon, ref, 0, ret_isr_v, "Retención ISR por pagar", uuid])
+                    if ret_iva_v > 0: pol.append([num, "Diario", fecha_limpia, c_ret_iva, ref, 0, ret_iva_v, "Retención IVA por pagar", uuid])
                     pol.append([num, "Diario", fecha_limpia, c_proveedores, ref, 0, tot, prov, uuid])
                 else:
                     neto_pue = round(neto - ieps, 2) if ieps_activo else neto
@@ -88,9 +104,11 @@ def generar_polizas(df, is_egresos, aliases=None):
                     if ieps_activo and ieps > 0:
                         pol.append([num, "Egreso", fecha_limpia, c_ieps, ref, ieps, 0, "IEPS acreditable", uuid])
                     if iva > 0: pol.append([num, "Egreso", fecha_limpia, c_iva_pagado, ref, iva, 0, "IVA acreditable", uuid])
+                    if ret_isr_v > 0: pol.append([num, "Egreso", fecha_limpia, c_ret_isr_hon, ref, 0, ret_isr_v, "Retención ISR por pagar", uuid])
+                    if ret_iva_v > 0: pol.append([num, "Egreso", fecha_limpia, c_ret_iva, ref, 0, ret_iva_v, "Retención IVA por pagar", uuid])
                     pol.append([num, "Egreso", fecha_limpia, c_banco, ref, 0, tot, prov, uuid])
             else:
-                cli = str(r["nombre_receptor"])[:50]
+                cli = nombre_tercero[:50]
                 c_principal = c_principal if c_principal != "PENDIENTE" else c_ventas
                 if metodo == "PPD":
                     pol.append([num, "Diario", fecha_limpia, c_clientes, ref, tot, 0, cli, uuid])
@@ -103,12 +121,12 @@ def generar_polizas(df, is_egresos, aliases=None):
 
         elif tipo == "E": 
             if rol == "purchase":
-                prov = str(r["nombre_emisor"])[:50]
+                prov = nombre_tercero[:50]
                 pol.append([num, "Diario", fecha_limpia, c_proveedores, ref, tot, 0, f"NC Prov - {prov}", uuid])
                 pol.append([num, "Diario", fecha_limpia, c_principal, ref, 0, neto, concepto, uuid])
                 if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_pago, ref, 0, iva, "Reversión IVA pendiente", uuid])
             else:
-                cli = str(r["nombre_receptor"])[:50]
+                cli = nombre_tercero[:50]
                 pol.append([num, "Diario", fecha_limpia, c_principal, ref, neto, 0, concepto, uuid])
                 if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_cobro, ref, iva, 0, "Reversión IVA pendiente", uuid])
                 pol.append([num, "Diario", fecha_limpia, c_clientes, ref, 0, tot, f"NC Cli - {cli}", uuid])
@@ -127,14 +145,19 @@ def generar_polizas(df, is_egresos, aliases=None):
                     pol.append([num, "Ingreso", fecha_limpia, c_iva_pdte_cobro, ref, iva, 0, "Cancelación IVA pendiente de cobro", uuid])
                     pol.append([num, "Ingreso", fecha_limpia, c_iva_cobrado, ref, 0, iva, "Reclasificación IVA trasladado", uuid])
 
-        elif tipo == "N": 
+        elif tipo == "N":
+            # Si usas CONTPAQi Nóminas (modo por defecto) NO duplicamos la póliza:
+            # esa la genera el módulo de Nóminas. Solo se arma desde XML si modo="xml".
+            if nomina_modo != "xml":
+                num += 1
+                continue
             c_nom = cuentas.get("nomina", "60010000")
-            c_ret_isr = cuentas.get("retencion_isr", "21601000")
+            c_ret_isr = cuentas.get("ret_isr_nomina", "21601000")
             pol.append([num, "Diario", fecha_limpia, c_nom, ref, float(r["subtotal"]), 0, f"Provisión Nómina {r['departamento']}"[:50], ""])
-            if float(r["ret_isr"]) > 0: 
+            if float(r["ret_isr"]) > 0:
                 pol.append([num, "Diario", fecha_limpia, c_ret_isr, ref, 0, float(r["ret_isr"]), "Retención ISR nómina", ""])
             pol.append([num, "Diario", fecha_limpia, c_banco, ref, 0, tot, "Neto a Pagar", ""])
-            
+
         num += 1
 
     polizas_df = pd.DataFrame(pol, columns=["Numero", "Tipo", "Fecha", "Cuenta", "Referencia", "Debe", "Haber", "Concepto", "UUID"])
@@ -422,10 +445,6 @@ def exportar(df, diot_df, output_dir, filename, log_data):
     # con lógicas distintas. (generar_archivo_diot_sat quedó obsoleta.)
     exportar_txt_contpaqi(polizas_df, output_dir, filename)
 
-    try:
-        import sys
-        if os.name == 'nt': os.startfile(output_dir)
-        elif sys.platform == 'darwin': __import__('subprocess').call(["open", output_dir])
-    except Exception: pass
-
+    # NO se abre la carpeta aquí: la capa de UI (main.py) decide si avisar y abrir,
+    # para que el usuario reciba el mensaje de "proceso terminado" y elija abrir o no.
     return filepath

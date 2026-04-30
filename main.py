@@ -118,6 +118,23 @@ def process_folder(folder_path, tipo_operacion):
     exportar(df, diot_df, output_dir, excel_filename, log_data)
     print(f"✅ ¡PROCESO COMPLETO! Excel guardado en: {output_dir}")
 
+    # Aviso de fin + el usuario decide si abre la carpeta (antes se abría sola).
+    abrir = messagebox.askyesno(
+        "Proceso completo",
+        f"Se generaron las pólizas y archivos en:\n{output_dir}\n\n"
+        f"Revisa el Log para ver descuadres o cuentas pendientes.\n\n"
+        f"¿Abrir la carpeta ahora?")
+    if abrir:
+        try:
+            if os.name == "nt":
+                os.startfile(output_dir)
+            elif sys.platform == "darwin":
+                __import__("subprocess").call(["open", output_dir])
+            else:
+                __import__("subprocess").call(["xdg-open", output_dir])
+        except Exception:
+            pass
+
 def learn_from_excel_ui():
     from export import exportar_txt_contpaqi # Aseguramos importar el generador de TXT
     
@@ -218,6 +235,103 @@ def set_output_folder():
         save_settings(settings)
         print(f"\n⚙️ Configuración Guardada: Los archivos irán a {folder}")
 
+def abrir_configuracion():
+    """Ventana de Configuración: carpeta de salida, catálogo de cuentas (con la
+    fecha de última actualización del archivo) y el toggle de IEPS con advertencia."""
+    import datetime
+    settings = load_settings()
+
+    win = tk.Toplevel()
+    win.title("Configuración")
+    win.geometry("660x460")
+    win.configure(bg="#1E1E2E")
+
+    Label(win, text="⚙️ Configuración", bg="#1E1E2E", fg="#F9E2AF",
+          font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=14, pady=(12, 4))
+
+    def bloque(titulo):
+        f = Frame(win, bg="#1E1E2E", padx=14, pady=6); f.pack(fill="x")
+        Label(f, text=titulo, bg="#1E1E2E", fg="#CDD6F4",
+              font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        val = Label(f, text="", bg="#1E1E2E", fg="#A6ADC8", font=("Consolas", 9),
+                    wraplength=600, justify="left"); val.pack(anchor="w")
+        return f, val
+
+    def fecha_archivo(path):
+        try:
+            ts = os.path.getmtime(path)
+            return datetime.datetime.fromtimestamp(ts).strftime("%d/%m/%Y %H:%M")
+        except Exception:
+            return None
+
+    # --- Carpeta de salida ---
+    f_out, lbl_out = bloque("Carpeta de salida (pólizas, Excel y DIOT):")
+    lbl_out.config(text=settings.get("output_path", "(no definida)"))
+    def cambiar_out():
+        d = filedialog.askdirectory(title="Carpeta de Salida",
+                                    initialdir=load_settings().get("output_path", APP_DIR))
+        if d:
+            s = load_settings(); s["output_path"] = d; save_settings(s)
+            lbl_out.config(text=d); print(f"⚙️ Carpeta de salida: {d}")
+    crear_boton(f_out, "Cambiar carpeta", "#45475A", "#585B70", cambiar_out).pack(anchor="w", pady=4)
+
+    # --- Catálogo de cuentas ---
+    f_cat, lbl_cat = bloque("Catálogo de cuentas (COA):")
+    def pintar_cat():
+        cat = load_settings().get("catalogo_path", "(no definido)")
+        fch = fecha_archivo(cat)
+        lbl_cat.config(text=f"{cat}\nÚltima actualización: {fch}" if fch
+                       else f"{cat}\n(no se encontró el archivo)")
+    pintar_cat()
+    def cambiar_cat():
+        path = filedialog.askopenfilename(title="Catálogo de cuentas",
+                                          filetypes=[("Texto/Excel/CSV", "*.txt *.xlsx *.csv"),
+                                                     ("Todos", "*.*")])
+        if path:
+            s = load_settings(); s["catalogo_path"] = path; save_settings(s)
+            pintar_cat(); print(f"⚙️ Catálogo actualizado: {path}")
+    crear_boton(f_cat, "Cambiar catálogo", "#45475A", "#585B70", cambiar_cat).pack(anchor="w", pady=4)
+
+    Frame(win, bg="#313244", height=1).pack(fill="x", padx=14, pady=10)
+
+    # --- Toggle IEPS ---
+    f_ieps = Frame(win, bg="#1E1E2E", padx=14, pady=4); f_ieps.pack(fill="x")
+    var_ieps = tk.BooleanVar(value=bool(settings.get("acredita_ieps", False)))
+    def toggle_ieps():
+        s = load_settings(); s["acredita_ieps"] = bool(var_ieps.get()); save_settings(s)
+        print(f"⚙️ Acreditamiento de IEPS {'ACTIVADO' if var_ieps.get() else 'desactivado'}.")
+        cta = str(load_settings().get("cuentas_default", {}).get("ieps_acreditable", "")).strip()
+        if var_ieps.get() and not cta:
+            messagebox.showwarning("Falta la cuenta de IEPS",
+                "Activaste el acreditamiento de IEPS pero no hay cuenta 'ieps_acreditable' "
+                "en settings.json. El IEPS seguirá en el costo hasta que la definas.")
+    tk.Checkbutton(f_ieps, text="Acreditar IEPS (separarlo a su propia cuenta)",
+                   variable=var_ieps, command=toggle_ieps, bg="#1E1E2E", fg="#CDD6F4",
+                   selectcolor="#313244", activebackground="#1E1E2E",
+                   font=("Segoe UI", 10, "bold")).pack(anchor="w")
+    Label(f_ieps, text="⚠️ Actívalo SOLO si la empresa es sujeta a IEPS (gasolineras, bebidas, "
+                       "tabacos, etc.).\nSi no lo es, el IEPS debe quedarse como parte del costo "
+                       "(déjalo apagado).",
+          bg="#1E1E2E", fg="#F38BA8", font=("Segoe UI", 9), justify="left").pack(anchor="w", pady=(2, 0))
+
+    Frame(win, bg="#313244", height=1).pack(fill="x", padx=14, pady=10)
+
+    # --- Modo de nómina ---
+    f_nom = Frame(win, bg="#1E1E2E", padx=14, pady=4); f_nom.pack(fill="x")
+    var_nom = tk.BooleanVar(value=str(settings.get("nomina_modo", "contpaqi")).lower() == "xml")
+    def toggle_nom():
+        s = load_settings(); s["nomina_modo"] = "xml" if var_nom.get() else "contpaqi"; save_settings(s)
+        print(f"⚙️ Modo de nómina: {s['nomina_modo']}.")
+    tk.Checkbutton(f_nom, text="Generar póliza de nómina desde el XML",
+                   variable=var_nom, command=toggle_nom, bg="#1E1E2E", fg="#CDD6F4",
+                   selectcolor="#313244", activebackground="#1E1E2E",
+                   font=("Segoe UI", 10, "bold")).pack(anchor="w")
+    Label(f_nom, text="Déjalo APAGADO si usas CONTPAQi Nóminas (ese módulo ya genera la póliza; "
+                      "así no se duplica).\nEnciéndelo solo si quieres que esta app arme la nómina "
+                      "desde el CFDI.",
+          bg="#1E1E2E", fg="#A6ADC8", font=("Segoe UI", 9), justify="left").pack(anchor="w", pady=(2, 0))
+
+
 def clear_log(text_widget):
     text_widget.delete('1.0', tk.END)
 
@@ -233,8 +347,8 @@ def crear_boton(parent, text, bg, hover, command):
     return btn
 
 def administrar_alias_ui():
-    """Ventana para que el usuario edite el apodo (shortname) de cada tercero.
-    La Referencia de las pólizas será  RFC-APODO  (consistente y filtrable)."""
+    """Ventana para que el usuario edite el alias (shortname) de cada tercero.
+    La Referencia de las pólizas será  RFC-ALIAS  (consistente y filtrable)."""
     from tkinter import ttk
     from db import get_aliases_full, set_alias, list_empresas
     from terceros import limpiar_shortname, normalizar_shortname, construir_referencia
@@ -256,18 +370,18 @@ def administrar_alias_ui():
           font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
     combo = ttk.Combobox(top, values=empresas, state="readonly", width=24)
     combo.pack(side=tk.LEFT, padx=8); combo.current(0)
-    Label(win, text="La Referencia de cada póliza será  RFC-APODO  (sin espacios, máx 30 caracteres).",
+    Label(win, text="La Referencia de cada póliza será  RFC-ALIAS  (sin espacios, máx 30 caracteres).",
           bg="#1E1E2E", fg="#A6ADC8", font=("Segoe UI", 9)).pack(anchor="w", padx=12)
 
     cols = ("rfc", "nombre", "apodo", "ref")
     tree = ttk.Treeview(win, columns=cols, show="headings", height=15)
     for c, txt, w in [("rfc", "RFC", 130), ("nombre", "Nombre oficial", 250),
-                      ("apodo", "Apodo", 120), ("ref", "Referencia resultante", 250)]:
+                      ("apodo", "Alias", 120), ("ref", "Referencia resultante", 250)]:
         tree.heading(c, text=txt); tree.column(c, width=w, anchor="w")
     tree.pack(fill="both", expand=True, padx=12, pady=8)
 
     edit = Frame(win, bg="#1E1E2E", padx=12, pady=8); edit.pack(fill="x")
-    Label(edit, text="Apodo:", bg="#1E1E2E", fg="#CDD6F4").pack(side=tk.LEFT)
+    Label(edit, text="Alias:", bg="#1E1E2E", fg="#CDD6F4").pack(side=tk.LEFT)
     var = tk.StringVar()
     tk.Entry(edit, textvariable=var, width=20, font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=6)
     prev = Label(edit, text="", bg="#1E1E2E", fg="#A6E3A1", font=("Consolas", 9))
@@ -295,13 +409,13 @@ def administrar_alias_ui():
         rfc = sel[0]
         limpio = limpiar_shortname(var.get())
         if not limpio:
-            messagebox.showwarning("Apodo vacío",
-                                   "El apodo no puede quedar vacío. Escribe algo como LUZ, TELMEX, etc.")
+            messagebox.showwarning("Alias vacío",
+                                   "El alias no puede quedar vacío. Escribe algo como LUZ, TELMEX, etc.")
             return
         set_alias(combo.get(), rfc, limpio)
         cargar(); tree.selection_set(rfc); tree.see(rfc)
 
-    crear_boton(edit, "💾 Guardar Apodo", "#38A169", "#2F855A", guardar).pack(side=tk.LEFT, padx=8)
+    crear_boton(edit, "💾 Guardar Alias", "#38A169", "#2F855A", guardar).pack(side=tk.LEFT, padx=8)
     var.trace_add("write", actualizar_preview)
     tree.bind("<<TreeviewSelect>>", on_select)
     combo.bind("<<ComboboxSelected>>", lambda e: cargar())
@@ -337,7 +451,7 @@ def main():
     crear_boton(left_frame, "👥 Administrar Alias de Terceros", "#D69E2E", "#B7791F", administrar_alias_ui).pack(fill="x", pady=5)
 
     Frame(left_frame, bg="#313244", height=1).pack(fill="x", pady=15)
-    crear_boton(left_frame, "⚙️ Configurar Carpeta de Salida", "#45475A", "#585B70", set_output_folder).pack(fill="x", pady=5)
+    crear_boton(left_frame, "⚙️ Configuración", "#45475A", "#585B70", abrir_configuracion).pack(fill="x", pady=5)
 
     right_frame = Frame(root, bg="#11111B", padx=10, pady=10)
     right_frame.pack(side=tk.RIGHT, expand=True, fill="both")

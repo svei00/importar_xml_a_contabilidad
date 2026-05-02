@@ -103,21 +103,71 @@ def _ensure_alias_table(c):
     CREATE TABLE IF NOT EXISTS alias_terceros (
         rfc TEXT PRIMARY KEY, shortname TEXT, nombre_oficial TEXT, actualizado TEXT
     )""")
+    # Migración no destructiva: añade columnas nuevas si faltan en BDs viejas.
+    #   tipo   = 'C' (Cliente/emitidas) | 'P' (Proveedor/recibidas)
+    #   cuenta = cuenta de cliente asignada (10501001…); solo aplica a clientes.
+    cols = {r[1] for r in c.execute("PRAGMA table_info(alias_terceros)").fetchall()}
+    if "tipo" not in cols:
+        c.execute("ALTER TABLE alias_terceros ADD COLUMN tipo TEXT")
+    if "cuenta" not in cols:
+        c.execute("ALTER TABLE alias_terceros ADD COLUMN cuenta TEXT")
 
-def ensure_alias(empresa_rfc, tercero_rfc, nombre_oficial, default_short):
-    """Inserta el alias por defecto solo si el RFC del tercero aún no existe."""
+def ensure_alias(empresa_rfc, tercero_rfc, nombre_oficial, default_short, tipo=None):
+    """Inserta el alias por defecto solo si el RFC del tercero aún no existe.
+    `tipo` ('C'/'P') se fija al insertar; si ya existe sin tipo, se rellena."""
     tercero_rfc = str(tercero_rfc).strip().upper()
     if not tercero_rfc or tercero_rfc == "NAN" or len(tercero_rfc) < 12:
         return
     import datetime
     conn = get_conn(empresa_rfc); c = conn.cursor()
     _ensure_alias_table(c)
-    c.execute("SELECT rfc FROM alias_terceros WHERE rfc=?", (tercero_rfc,))
-    if c.fetchone() is None:
-        c.execute("INSERT INTO alias_terceros VALUES (?,?,?,?)",
+    row = c.execute("SELECT rfc, tipo FROM alias_terceros WHERE rfc=?", (tercero_rfc,)).fetchone()
+    if row is None:
+        c.execute("INSERT INTO alias_terceros (rfc, shortname, nombre_oficial, actualizado, tipo) "
+                  "VALUES (?,?,?,?,?)",
                   (tercero_rfc, default_short, str(nombre_oficial)[:200],
-                   datetime.date.today().isoformat()))
+                   datetime.date.today().isoformat(), tipo))
+    elif tipo and not row[1]:
+        c.execute("UPDATE alias_terceros SET tipo=? WHERE rfc=?", (tipo, tercero_rfc))
     conn.commit(); conn.close()
+
+def set_alias_cuenta(empresa_rfc, tercero_rfc, cuenta):
+    """Asigna la cuenta de cliente (10501001…) a un RFC. Mapa determinista (no ML)."""
+    tercero_rfc = str(tercero_rfc).strip().upper()
+    conn = get_conn(empresa_rfc); c = conn.cursor()
+    _ensure_alias_table(c)
+    c.execute("UPDATE alias_terceros SET cuenta=? WHERE rfc=?", (str(cuenta).strip(), tercero_rfc))
+    conn.commit(); conn.close()
+
+def get_cuentas_clientes(empresa_rfc):
+    """{rfc: cuenta} de los terceros con cuenta asignada, para mapear clientes en emitidas."""
+    conn = get_conn(empresa_rfc); c = conn.cursor()
+    _ensure_alias_table(c)
+    data = {r[0]: r[1] for r in c.execute(
+        "SELECT rfc, cuenta FROM alias_terceros WHERE cuenta IS NOT NULL AND cuenta != ''").fetchall()}
+    conn.close()
+    return data
+
+def backfill_tipo_aliases(empresa_rfc):
+    """Rellena el tipo (C/P) de aliases sin tipo, infiriéndolo de `facturas`:
+    RFC visto como emisor (≠ empresa) = Proveedor; como receptor (≠ empresa) = Cliente."""
+    emp = "".join(ch for ch in str(empresa_rfc) if ch.isalnum()).upper()
+    conn = get_conn(empresa_rfc); c = conn.cursor()
+    _ensure_alias_table(c)
+    try:
+        prov = {r[0] for r in c.execute("SELECT DISTINCT rfc_emisor FROM facturas").fetchall()
+                if r[0] and str(r[0]).upper() != emp}
+        cli = {r[0] for r in c.execute("SELECT DISTINCT rfc_receptor FROM facturas").fetchall()
+               if r[0] and str(r[0]).upper() != emp}
+        for (rfc,) in c.execute("SELECT rfc FROM alias_terceros WHERE tipo IS NULL OR tipo=''").fetchall():
+            t = "C" if rfc in cli else ("P" if rfc in prov else None)
+            if t:
+                c.execute("UPDATE alias_terceros SET tipo=? WHERE rfc=?", (t, rfc))
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
 
 def set_alias(empresa_rfc, tercero_rfc, shortname):
     """Guarda/actualiza el apodo elegido por el usuario."""
@@ -141,10 +191,11 @@ def get_aliases(empresa_rfc):
     return data
 
 def get_aliases_full(empresa_rfc):
-    """Devuelve [(rfc, shortname, nombre_oficial)] ordenado, para la GUI."""
+    """Devuelve [(rfc, shortname, nombre_oficial, tipo, cuenta)] ordenado, para la GUI."""
     conn = get_conn(empresa_rfc); c = conn.cursor()
     _ensure_alias_table(c)
-    c.execute("SELECT rfc, shortname, nombre_oficial FROM alias_terceros ORDER BY nombre_oficial")
+    c.execute("SELECT rfc, shortname, nombre_oficial, tipo, cuenta FROM alias_terceros "
+              "ORDER BY tipo, nombre_oficial")
     data = c.fetchall()
     conn.close()
     return data

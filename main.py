@@ -74,7 +74,15 @@ def process_folder(folder_path, tipo_operacion):
             log_data["cancelados"] += 1
             print(f"   🚨 ALERTA: CFDI Cancelado -> {r['uuid']}")
 
-        if r["tipo"] != "N":
+        if r["tipo"] == "N":
+            pass  # la nómina ya tiene su cuenta (60010000) asignada arriba
+        elif tipo_operacion == "ingresos":
+            # En EMITIDAS la cuenta principal es de INGRESO (Ventas). El clasificador
+            # ML solo conoce cuentas de GASTO (se entrena con recibidas), así que NO
+            # se usa aquí: codificaría una venta a una cuenta 60xx. El detalle por
+            # cliente sale de la Referencia (RFC-ALIAS), no de una subcuenta.
+            r["cuenta"] = cuentas_def.get("ventas", "40101000")
+        else:
             cuenta = predict(r["concepto"], r["nombre_emisor"], r["cp"], empresa_rfc) or cuentas_def.get("gastos_generales", "60000000")
             r["cuenta"] = cuenta
 
@@ -347,11 +355,13 @@ def crear_boton(parent, text, bg, hover, command):
     return btn
 
 def administrar_alias_ui():
-    """Ventana para que el usuario edite el alias (shortname) de cada tercero.
-    La Referencia de las pólizas será  RFC-ALIAS  (consistente y filtrable)."""
+    """Administra Clientes (emitidas) y Proveedores (recibidas): alias para la
+    Referencia (RFC-ALIAS) y, SOLO para clientes, la cuenta contable (10501001…).
+    La cuenta de cliente es un mapa determinista RFC->cuenta (no usa ML)."""
     from tkinter import ttk
-    from db import get_aliases_full, set_alias, list_empresas
-    from terceros import limpiar_shortname, normalizar_shortname, construir_referencia
+    from db import (get_aliases_full, set_alias, set_alias_cuenta,
+                    backfill_tipo_aliases, list_empresas)
+    from terceros import limpiar_shortname, construir_referencia
 
     empresas = list_empresas()
     if not empresas:
@@ -360,38 +370,57 @@ def administrar_alias_ui():
                             "para que se llenen los terceros.")
         return
 
+    TIPO_LABEL = {"C": "Cliente", "P": "Proveedor", None: "", "": ""}
+
     win = tk.Toplevel()
-    win.title("Administrar Alias de Terceros")
-    win.geometry("780x540")
+    win.title("Administrar Clientes y Proveedores")
+    win.geometry("960x560")
     win.configure(bg="#1E1E2E")
 
     top = Frame(win, bg="#1E1E2E", padx=12, pady=10); top.pack(fill="x")
     Label(top, text="Empresa:", bg="#1E1E2E", fg="#CDD6F4",
           font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
-    combo = ttk.Combobox(top, values=empresas, state="readonly", width=24)
+    combo = ttk.Combobox(top, values=empresas, state="readonly", width=22)
     combo.pack(side=tk.LEFT, padx=8); combo.current(0)
-    Label(win, text="La Referencia de cada póliza será  RFC-ALIAS  (sin espacios, máx 30 caracteres).",
+    Label(top, text="   Mostrar:", bg="#1E1E2E", fg="#CDD6F4",
+          font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+    filtro = ttk.Combobox(top, values=["Todos", "Clientes", "Proveedores"],
+                          state="readonly", width=14)
+    filtro.pack(side=tk.LEFT, padx=8); filtro.current(0)
+
+    Label(win, text="Referencia = RFC-ALIAS (sin espacios, máx 30). La Cuenta solo aplica a "
+                    "CLIENTES (10501001…); déjala vacía y caerán en la cuenta varios.",
           bg="#1E1E2E", fg="#A6ADC8", font=("Segoe UI", 9)).pack(anchor="w", padx=12)
 
-    cols = ("rfc", "nombre", "apodo", "ref")
+    cols = ("rfc", "nombre", "tipo", "alias", "cuenta", "ref")
     tree = ttk.Treeview(win, columns=cols, show="headings", height=15)
-    for c, txt, w in [("rfc", "RFC", 130), ("nombre", "Nombre oficial", 250),
-                      ("apodo", "Alias", 120), ("ref", "Referencia resultante", 250)]:
+    for c, txt, w in [("rfc", "RFC", 130), ("nombre", "Nombre oficial", 240),
+                      ("tipo", "Tipo", 80), ("alias", "Alias", 110),
+                      ("cuenta", "Cuenta", 90), ("ref", "Referencia", 200)]:
         tree.heading(c, text=txt); tree.column(c, width=w, anchor="w")
     tree.pack(fill="both", expand=True, padx=12, pady=8)
 
     edit = Frame(win, bg="#1E1E2E", padx=12, pady=8); edit.pack(fill="x")
     Label(edit, text="Alias:", bg="#1E1E2E", fg="#CDD6F4").pack(side=tk.LEFT)
     var = tk.StringVar()
-    tk.Entry(edit, textvariable=var, width=20, font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=6)
+    tk.Entry(edit, textvariable=var, width=18, font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=6)
+    Label(edit, text="Cuenta (cliente):", bg="#1E1E2E", fg="#CDD6F4").pack(side=tk.LEFT, padx=(12, 0))
+    var_cta = tk.StringVar()
+    tk.Entry(edit, textvariable=var_cta, width=12, font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=6)
     prev = Label(edit, text="", bg="#1E1E2E", fg="#A6E3A1", font=("Consolas", 9))
     prev.pack(side=tk.LEFT, padx=10)
 
     def cargar():
+        backfill_tipo_aliases(combo.get())
         tree.delete(*tree.get_children())
-        for rfc, short, nom in get_aliases_full(combo.get()):
+        f = filtro.get()
+        for rfc, short, nom, tipo, cuenta in get_aliases_full(combo.get()):
+            if f == "Clientes" and tipo != "C": continue
+            if f == "Proveedores" and tipo != "P": continue
             ref = construir_referencia(rfc, nom or "", {rfc: short} if short else {})
-            tree.insert("", "end", iid=rfc, values=(rfc, (nom or "")[:40], short or "", ref))
+            tree.insert("", "end", iid=rfc,
+                        values=(rfc, (nom or "")[:38], TIPO_LABEL.get(tipo, ""),
+                                short or "", cuenta or "", ref))
 
     def actualizar_preview(*_):
         sel = tree.selection()
@@ -400,25 +429,33 @@ def administrar_alias_ui():
     def on_select(_e=None):
         sel = tree.selection()
         if sel:
-            var.set(tree.item(sel[0], "values")[2]); actualizar_preview()
+            vals = tree.item(sel[0], "values")
+            var.set(vals[3]); var_cta.set(vals[4]); actualizar_preview()
 
     def guardar():
         sel = tree.selection()
         if not sel:
-            messagebox.showinfo("Selecciona", "Elige un tercero de la lista."); return
+            messagebox.showinfo("Selecciona", "Elige un cliente o proveedor de la lista."); return
         rfc = sel[0]
         limpio = limpiar_shortname(var.get())
         if not limpio:
             messagebox.showwarning("Alias vacío",
                                    "El alias no puede quedar vacío. Escribe algo como LUZ, TELMEX, etc.")
             return
+        cta = var_cta.get().strip()
+        if cta and not cta.replace("-", "").isdigit():
+            messagebox.showwarning("Cuenta inválida",
+                                   "La cuenta de cliente debe ser numérica (ej. 10501001)."); return
         set_alias(combo.get(), rfc, limpio)
-        cargar(); tree.selection_set(rfc); tree.see(rfc)
+        set_alias_cuenta(combo.get(), rfc, cta)
+        cargar();
+        if tree.exists(rfc): tree.selection_set(rfc); tree.see(rfc)
 
-    crear_boton(edit, "💾 Guardar Alias", "#38A169", "#2F855A", guardar).pack(side=tk.LEFT, padx=8)
+    crear_boton(edit, "💾 Guardar", "#38A169", "#2F855A", guardar).pack(side=tk.LEFT, padx=8)
     var.trace_add("write", actualizar_preview)
     tree.bind("<<TreeviewSelect>>", on_select)
     combo.bind("<<ComboboxSelected>>", lambda e: cargar())
+    filtro.bind("<<ComboboxSelected>>", lambda e: cargar())
     cargar()
 
 
@@ -448,7 +485,7 @@ def main():
     
     Label(left_frame, text="Inteligencia Artificial:", bg=bg_dark, fg=text_color, font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 10))
     crear_boton(left_frame, "🧠 Aprender de Excel Corregido", "#805AD5", "#6B46C1", learn_from_excel_ui).pack(fill="x", pady=5)
-    crear_boton(left_frame, "👥 Administrar Alias de Terceros", "#D69E2E", "#B7791F", administrar_alias_ui).pack(fill="x", pady=5)
+    crear_boton(left_frame, "👥 Administrar Clientes y Proveedores", "#D69E2E", "#B7791F", administrar_alias_ui).pack(fill="x", pady=5)
 
     Frame(left_frame, bg="#313244", height=1).pack(fill="x", pady=15)
     crear_boton(left_frame, "⚙️ Configuración", "#45475A", "#585B70", abrir_configuracion).pack(fill="x", pady=5)

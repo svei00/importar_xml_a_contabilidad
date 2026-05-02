@@ -1,0 +1,80 @@
+# ROADMAP / Estado del proyecto
+
+Estado interno de desarrollo de **importar_xml_a_contabilidad** (XML CFDI 4.0 → pólizas
+ContpaqI 18.5.2 + DIOT). El `README.md` es para el usuario final; este archivo es la
+bitácora técnica: qué está hecho, qué falta y qué ideas están "madurando".
+
+> Convención: ✅ hecho · 🚧 en progreso · ⏳ pendiente acordado · 💡 idea por madurar
+
+---
+
+## ✅ Hecho y probado
+
+- **TXT ContpaqI de ancho fijo** — campo cuenta = 31 chars (el bug de truncado quedó
+  arreglado; importe en col 67, bloque fiscal en col 99). Guardado por `validar_layout.py`.
+- **Referencia `RFC-ALIAS`** + administrador de alias por empresa (GUI). Alias editable
+  (CFE→LUZ, etc.). Clientes (emitidas) y proveedores (recibidas) caen en la misma tabla.
+- **DIOT 2025** reescrita: una fila por RFC, base de FLUJO (PUE + REP; se omite PPD sin
+  pagar), mapa correcto de 54 columnas, col 54 = "1". `diot.py`.
+- **Validador Debe=Haber** antes de escribir el TXT (`export.py::validar_balance_polizas`)
+  + hoja `DIOT_LISTA` en el Excel de egresos.
+- **Retención en compras** (honorarios/servicios): se acreditan ret ISR y ret IVA → las
+  pólizas con retención ahora cuadran. Cuentas configurables en `settings.json`.
+- **Nombres en Title Case** (el XML los trae en MAYÚSCULAS); RFC se queda en mayúsculas.
+- **Concepto de pagos (REP)** sin el UUID feo (ahora "Complemento de Pago (REP)").
+- **IEPS toggle** (`acredita_ieps`, default OFF = sin cambio). UI en Configuración.
+- **Nómina toggle** (`nomina_modo`, default "contpaqi" = NO genera póliza de nómina porque
+  CONTPAQi Nóminas ya la hace). "xml" la arma desde el CFDI (parser básico aún).
+- **Configuración** (diálogo): carpeta de salida, catálogo COA + fecha de última
+  modificación, toggles de IEPS y nómina.
+- **Fin de proceso**: messagebox "Proceso completo" + pregunta si abrir carpeta (ya no se
+  abre sola).
+- **EMITIDAS (ventas)** — la cuenta principal va a Ventas (`ventas`=40101000), ya NO al
+  clasificador de gastos. Probado con factura PPD real + su REP: ambas cuadran. (Bug A.)
+- **Clientes por cuenta + Tipo (Phase E)** — el administrador ahora distingue Clientes
+  (emitidas) y Proveedores (recibidas) con columna Tipo + filtro. Cada CLIENTE puede tener
+  su cuenta (mapa determinista RFC->cuenta, NO ML); fallback nacional/público a
+  `clientes`=10501999, extranjero a `clientes_extranjero`=10502000. Migración de BD no
+  destructiva (ALTER ADD COLUMN tipo/cuenta) + backfill del tipo desde `facturas`. Probado.
+
+## ⏳ Pendiente acordado (próximos pasos)
+
+- **Retención en VENTAS** (cuando al cliente lo retienen): falta asentar "impuestos
+  retenidos a favor / por cobrar" (ISR e IVA). El validador marcará el descuadre mientras
+  tanto. Necesito los números de cuenta del COA.
+- **Confirmar cuentas default de emitidas** contra el COA: clientes 10501001, IVA pdte
+  cobro 20901000, IVA trasladado 20801000.
+- **Reglas RFC→cuenta para cargas patronales** (SEPAF Jalisco / IMSS / INFONAVIT): llegan
+  como CFDI recibido sin IVA; ya se asientan por el flujo normal, pero caen en
+  gastos_generales. Mapear sus RFC a su cuenta de gasto. (Falta un XML de muestra.)
+- **dashboard.py** roto: llama `get_conn()` sin RFC (API multi-empresa actual lo requiere).
+- **Capturar `iva_exento`** en el parser (hoy siempre 0) → columnas exento/0% de la DIOT.
+- **Crear subcuentas de clientes en ContpaqI** (tarea del usuario): 10501001/002 (clientes
+  grandes), 10501003/004 (distribuidora), 10501999 (varios/público). Hoy 10501000 es la
+  afectable; al abrir hijas se vuelve mayor.
+- **Ventana editora de settings.json** (PROMETIDA al usuario): UI para editar todas las
+  cuentas configurables (bancos, IVA, retenciones, ventas, clientes, etc.) sin tocar el
+  JSON a mano. Hoy solo el diálogo Configuración cubre carpeta/catálogo/IEPS/nómina.
+
+## 💡 Ideas por madurar (sin compromiso)
+
+- **Nómina desde XML (1.2)**: el parser aún NO lee el complemento (Percepciones/
+  Deducciones/OtrosPagos); el modo "xml" usa subtotal/total/ISR crudo. Solo vale la pena
+  si llega un cliente que NO use CONTPAQi Nóminas. Tengo 1 XML de nómina timbrado del
+  usuario para cuando se ataque.
+- **Módulo de cantidades mensuales de nómina**: alternativa al parseo, para clientes con
+  sistemas de nómina de terceros (Aspel, Excel) cuyos XML vienen incompletos. Decidir
+  parse-XML vs. captura manual según la calidad real de los datos de ese cliente.
+- **Clasificador de ventas** por producto/cliente (hoy todas las ventas van a una sola
+  cuenta de Ventas).
+- **Pestaña Clientes/Proveedores** en el administrador de alias (requiere etiquetar el rol
+  del RFC en la tabla; hoy la lista única ya funciona).
+- **IEPS por empresa** (hoy el flag es global en settings.json) y manejo de IEPS en
+  PPD/REP (hoy solo PUE).
+
+## Notas de arquitectura
+
+- Modelo ML y BD son **por empresa**: `empresas/<RFC>/conta_ml.db` y `.../modelo.pkl`.
+- Lee carpetas con `.xml` sueltos **y** `.zip` (extrae cada XML interno) — `load_folder`.
+- Tipos de póliza: Ingreso=efectivo entra (TXT 1), Egreso=efectivo sale (2),
+  Diario=sin movimiento de efectivo (3): PPD provisión, reclasificación, NC, nómina.

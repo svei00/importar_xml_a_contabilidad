@@ -4,7 +4,7 @@ import re
 from config import load_settings, cargar_catalogo
 from terceros import construir_referencia, titulo
 
-def generar_polizas(df, is_egresos, aliases=None):
+def generar_polizas(df, is_egresos, aliases=None, cuentas_clientes=None):
     """
     Toma los datos puros del SAT y genera el árbol de decisiones contables (Debe/Haber).
     Aplica las Normas de Información Financiera (NIF) para provisiones (PPD) y pagos (PUE/REP).
@@ -17,7 +17,11 @@ def generar_polizas(df, is_egresos, aliases=None):
     c_iva_pdte_pago = cuentas.get("iva_pdte_pago", "11901000") 
     # FIX: Se cambia cuenta de mayor 20101000 por cuenta afectable 20101999 por defecto
     c_proveedores = cuentas.get("proveedores", "20101999") 
-    c_clientes = cuentas.get("clientes", "10501001")
+    # Clientes: cuenta POR cliente (mapa determinista RFC->cuenta del admin de alias).
+    # Fallback: nacionales/público a la cuenta varios; extranjeros a la suya.
+    cuentas_clientes = cuentas_clientes or {}
+    c_clientes_default = cuentas.get("clientes", "10501999")
+    c_clientes_ext = cuentas.get("clientes_extranjero", "10502000")
     c_ventas = cuentas.get("ventas", "40101000")
     c_iva_cobrado = cuentas.get("iva_trasladado", "20801000")
     c_iva_pdte_cobro = cuentas.get("iva_pdte_cobro", "20901000")
@@ -67,6 +71,11 @@ def generar_polizas(df, is_egresos, aliases=None):
             # Sin RFC válido (p.ej. nómina): se conserva el folio como referencia.
             ref = ref_base[:30]
 
+        # Cuenta de cliente (solo emitidas): mapa RFC->cuenta, o varios/extranjero.
+        rfc_up = str(rfc_tercero).strip().upper()
+        c_cliente_row = (cuentas_clientes.get(rfc_up)
+                         or (c_clientes_ext if rfc_up == "XEXX010101000" else c_clientes_default))
+
         # Concepto del cargo/abono principal: "NOMBRE - descripción" (legible en el
         # Listado de Pólizas, aunque la descripción del XML sea legalese).
         concepto = (f"{nombre_tercero} - {desc}".strip(" -") if nombre_tercero else desc)[:100]
@@ -111,7 +120,7 @@ def generar_polizas(df, is_egresos, aliases=None):
                 cli = nombre_tercero[:50]
                 c_principal = c_principal if c_principal != "PENDIENTE" else c_ventas
                 if metodo == "PPD":
-                    pol.append([num, "Diario", fecha_limpia, c_clientes, ref, tot, 0, cli, uuid])
+                    pol.append([num, "Diario", fecha_limpia, c_cliente_row, ref, tot, 0, cli, uuid])
                     pol.append([num, "Diario", fecha_limpia, c_principal, ref, 0, neto, concepto, uuid])
                     if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_cobro, ref, 0, iva, "IVA pendiente de cobro", uuid])
                 else:
@@ -129,7 +138,7 @@ def generar_polizas(df, is_egresos, aliases=None):
                 cli = nombre_tercero[:50]
                 pol.append([num, "Diario", fecha_limpia, c_principal, ref, neto, 0, concepto, uuid])
                 if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_cobro, ref, iva, 0, "Reversión IVA pendiente", uuid])
-                pol.append([num, "Diario", fecha_limpia, c_clientes, ref, 0, tot, f"NC Cli - {cli}", uuid])
+                pol.append([num, "Diario", fecha_limpia, c_cliente_row, ref, 0, tot, f"NC Cli - {cli}", uuid])
 
         elif tipo == "P":
             if rol == "purchase":
@@ -140,7 +149,7 @@ def generar_polizas(df, is_egresos, aliases=None):
                     pol.append([num, "Egreso", fecha_limpia, c_iva_pdte_pago, ref, 0, iva, "Cancelación IVA pendiente", uuid])
             else:
                 pol.append([num, "Ingreso", fecha_limpia, c_banco, ref, tot, 0, "Cobro de cliente", uuid])
-                pol.append([num, "Ingreso", fecha_limpia, c_clientes, ref, 0, tot, concepto_cobro, uuid])
+                pol.append([num, "Ingreso", fecha_limpia, c_cliente_row, ref, 0, tot, concepto_cobro, uuid])
                 if iva > 0:
                     pol.append([num, "Ingreso", fecha_limpia, c_iva_pdte_cobro, ref, iva, 0, "Cancelación IVA pendiente de cobro", uuid])
                     pol.append([num, "Ingreso", fecha_limpia, c_iva_cobrado, ref, 0, iva, "Reclasificación IVA trasladado", uuid])
@@ -372,12 +381,13 @@ def sincronizar_aliases(empresa_rfc, df, is_egresos):
     from terceros import normalizar_shortname
     col_rfc = "rfc_emisor" if is_egresos else "rfc_receptor"
     col_nom = "nombre_emisor" if is_egresos else "nombre_receptor"
+    tipo = "P" if is_egresos else "C"   # P=Proveedor (recibidas), C=Cliente (emitidas)
     for _, r in df.iterrows():
         if str(r.get("tipo", "")) == "N":   # nómina no tiene tercero proveedor
             continue
         rfc = str(r.get(col_rfc, "")).strip().upper()
         nombre = str(r.get(col_nom, ""))
-        ensure_alias(empresa_rfc, rfc, nombre, normalizar_shortname(nombre))
+        ensure_alias(empresa_rfc, rfc, nombre, normalizar_shortname(nombre), tipo=tipo)
     return get_aliases(empresa_rfc)
 
 def validar_balance_polizas(polizas_df, tol=0.01):
@@ -408,11 +418,16 @@ def exportar(df, diot_df, output_dir, filename, log_data):
     empresa_rfc = partes[2] if len(partes) >= 3 else ""
     try: aliases = sincronizar_aliases(empresa_rfc, df, is_egresos)
     except Exception: aliases = {}
+    try:
+        from db import get_cuentas_clientes
+        cuentas_clientes = get_cuentas_clientes(empresa_rfc)
+    except Exception:
+        cuentas_clientes = {}
 
     res_df = pd.DataFrame([{"Métrica": k, "Cantidad": v} for k, v in log_data.items()])
     df["Sugerencia"] = df.apply(lambda r: generar_sugerencia(r, df_catalogo), axis=1)
 
-    polizas_df = generar_polizas(df, is_egresos, aliases)
+    polizas_df = generar_polizas(df, is_egresos, aliases, cuentas_clientes)
 
     # Cuadre Debe=Haber + cuentas sin asignar ANTES de escribir el TXT.
     descuadres, pendientes = validar_balance_polizas(polizas_df)

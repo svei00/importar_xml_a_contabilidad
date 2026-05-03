@@ -55,6 +55,12 @@ bitácora técnica: qué está hecho, qué falta y qué ideas están "madurando"
 - **Ventana editora de settings.json** (PROMETIDA al usuario): UI para editar todas las
   cuentas configurables (bancos, IVA, retenciones, ventas, clientes, etc.) sin tocar el
   JSON a mano. Hoy solo el diálogo Configuración cubre carpeta/catálogo/IEPS/nómina.
+- **README.md desactualizado**: predata todo el trabajo reciente (dice "ñ→NI", "Administrar
+  Alias de Terceros", IEPS sin separar, DIOT doble como pendiente, roadmap viejo). Refrescar.
+  La guía de uso del día a día ya vive en `INSTRUCCIONES.md` (incl. importar/afectar en ContpaqI).
+- **Robustez `load_folder`**: hoy `except: pass` traga XML mal formados en silencio → se puede
+  perder una factura sin avisar. Cambiar para REGISTRAR en el Log qué archivos fallaron.
+  (Recomendado antes de usar la app sin supervisión por meses.)
 
 ## 💡 Ideas por madurar (sin compromiso)
 
@@ -71,6 +77,36 @@ bitácora técnica: qué está hecho, qué falta y qué ideas están "madurando"
   del RFC en la tabla; hoy la lista única ya funciona).
 - **IEPS por empresa** (hoy el flag es global en settings.json) y manejo de IEPS en
   PPD/REP (hoy solo PUE).
+
+## 💡 Módulo grande a futuro: Conciliación bancaria (PDF de bancos)
+
+Idea del usuario: leer estados de cuenta (Bancomer, Banamex) en PDF y automatizar.
+**Reencuadre clave:** el objetivo correcto NO es "PDF → póliza" (la línea del banco no
+dice la contracuenta: ¿depósito = cobro de cliente?, ¿préstamo?, ¿traspaso propio?). Las
+pólizas ya las generan los CFDI. El valor real del estado de cuenta es la **CONCILIACIÓN**:
+cruzar los movimientos del banco contra las pólizas ya registradas y **detectar lo que falta**
+(comisiones, intereses, IVA de comisiones, pagos sin CFDI).
+
+Partes y dificultad (de menor a mayor):
+1. PDF con texto (Bancomer) → `pdfplumber`/`camelot` (tablas posicionales). Un parser POR
+   banco; se rompen cuando el banco rediseña el formato (mantenimiento continuo).
+2. PDF con contraseña (Banamex) → `pikepdf` para descifrar con la clave. Resoluble.
+3. PDF como IMAGEN (sin capa de texto) → OCR. Tesseract local se equivoca en columnas de
+   dinero; Document AI en la nube es mucho mejor PERO manda estados de cuenta del cliente a
+   un tercero (problema de confidencialidad). Tradeoff real, decisión del usuario.
+4. NO usar markitdown/office2md aquí (aplana el layout tabular). Usar pdfplumber/camelot.
+
+Secuencia recomendada cuando se ataque:
+- (a) PDF→Excel de movimientos (Bancomer primero; pikepdf para Banamex).
+- (b) CONCILIAR movimientos vs pólizas del mes (match por importe/fecha/referencia) → marcar
+  los no conciliados.
+- (c) Auto-asentar SOLO lo determinista (comisión→gasto financiero+IVA, interés ganado); lo
+  demás se concilia contra póliza existente, no se recrea.
+- (d) Imagen/OCR al final, con revisión humana SIEMPRE.
+
+Regla de oro: la herramienta ASISTE la conciliación; nunca asienta a ciegas desde el PDF.
+Tamaño estimado: comparable al resto de la app junta. **No ahora** (primero usar la app
+varios meses con datos reales).
 
 ## Notas de arquitectura
 

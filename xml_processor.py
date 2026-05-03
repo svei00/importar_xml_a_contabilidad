@@ -101,20 +101,32 @@ def parse_xml(source):
 
 def load_folder(folder):
     rows = []
+    fallidos = []   # (archivo, motivo) — NUNCA se tragan en silencio: se reportan.
     for f in os.listdir(folder):
         full_path = os.path.join(folder, f)
         if f.lower().endswith(".xml"):
-            try: rows.append(parse_xml(full_path))
-            except Exception: pass
+            try:
+                rows.append(parse_xml(full_path))
+            except Exception as e:
+                fallidos.append((f, str(e)))
         elif f.lower().endswith(".zip"):
             try:
                 with zipfile.ZipFile(full_path, 'r') as z:
                     for xml_name in z.namelist():
                         if xml_name.lower().endswith(".xml"):
-                            with z.open(xml_name) as xml_file:
-                                try: rows.append(parse_xml(xml_file))
-                                except Exception: pass
-            except Exception: pass
+                            try:
+                                with z.open(xml_name) as xml_file:
+                                    rows.append(parse_xml(xml_file))
+                            except Exception as e:
+                                fallidos.append((f"{f} -> {xml_name}", str(e)))
+            except Exception as e:
+                fallidos.append((f, f"ZIP ilegible: {e}"))
+
+    if fallidos:
+        print(f"[AVISO] {len(fallidos)} XML NO se pudieron leer (no entraron en las pólizas):")
+        for nombre, err in fallidos:
+            print(f"   - {nombre}  ->  {err}")
+    print(f"[OK] {len(rows)} CFDI leidos correctamente.")
     return rows
 
 def es_pago(tipo): return tipo == "P"

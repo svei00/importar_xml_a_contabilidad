@@ -1,32 +1,69 @@
 # SAT → ContpaqI Automator AI
 
-Aplicación de escritorio (Python + Tkinter) que **lee los XML (CFDI 4.0) del SAT**, los **valida**, **clasifica la cuenta contable con Machine Learning** y genera las **pólizas** y la **DIOT** listas para importar a **ContpaqI Contabilidad 18.5.2**.
+Aplicación de escritorio (Python + Tkinter) que **lee los XML (CFDI 4.0) del SAT**, los
+**valida**, **clasifica la cuenta de gasto con Machine Learning** y genera las **pólizas**
+y la **DIOT** listas para importar a **ContpaqI Contabilidad 18.5.2**.
 
-El flujo está pensado para un ciclo de mejora continua: cada vez que corriges una cuenta en el Excel, la IA aprende y el siguiente mes clasifica mejor.
+El flujo está pensado para mejora continua: cada vez que corriges una cuenta de gasto en el
+Excel, la IA aprende y el siguiente mes clasifica mejor.
+
+> **¿Cómo se usa en el día a día (incluido importar y AFECTAR en ContpaqI)?**
+> Ver **[`INSTRUCCIONES.md`](INSTRUCCIONES.md)**.
+> **Estado de desarrollo / pendientes / ideas:** ver **[`ROADMAP.md`](ROADMAP.md)**.
 
 ---
 
 ## ¿Qué hace, paso a paso?
 
-1. **Analiza XML.** Recorre una carpeta (XML sueltos o ZIPs) y extrae de cada CFDI: tipo, fecha, RFC/nombre de emisor y receptor, subtotal, IVA 16/8, IEPS, retenciones, UUID, método de pago (PUE/PPD), código postal, serie/folio y los documentos relacionados de los REP.
+1. **Analiza XML.** Recorre una carpeta (XML sueltos o ZIPs) y extrae de cada CFDI: tipo,
+   fecha, RFC/nombre de emisor y receptor, subtotal, IVA 16/8, IEPS, retenciones, UUID,
+   método de pago (PUE/PPD), código postal, serie/folio y los documentos relacionados de
+   los REP. Los XML que no se puedan leer se **reportan en el Log** (no se pierden en silencio).
 2. **Valida contra el SAT.** Consulta el estatus de cada UUID (Vigente / Cancelado) y lo marca.
-3. **Clasifica con ML.** Un modelo NLP (scikit-learn: TF‑IDF del concepto + proveedor, OneHot del CP, LogisticRegression) predice la cuenta contable. Si no hay modelo todavía, cae a la cuenta de gastos por defecto.
-4. **Genera asientos.** Construye el árbol Debe/Haber aplicando NIF para provisiones (PPD), pagos directos (PUE) y REP, además de notas de crédito (E) y nómina (N).
-5. **Exporta tres entregables:**
-   - **Excel** (`Polizas_<TIPO>_<RFC>_<AAAA>_<MM>.xlsx`) con hojas `RESUMEN`, `BASE` y `POLIZAS_CONTPAQI` — para que **tú revises** antes de importar.
-   - **TXT de pólizas** (`Polizas_CONTPAQi_*.txt`) en formato tabular de ancho fijo, listo para **importar a ContpaqI**.
-   - **TXT de DIOT** en formato batch del SAT (54 columnas separadas por `|`).
-6. **Reentrena desde el Excel.** Si corriges cuentas en el Excel y lo vuelves a cargar (*Aprender de Excel Corregido*), la IA memoriza las correcciones **y regenera el TXT** de ContpaqI con tus cambios.
+3. **Clasifica con ML (solo gastos).** Un modelo NLP por empresa (TF‑IDF del concepto +
+   proveedor, OneHot del CP, LogisticRegression) predice la cuenta de **gasto** en recibidas.
+   Las **ventas** van a la cuenta de Ventas y los **clientes** a su cuenta por mapa fijo
+   (ver abajo): eso **no** usa ML.
+4. **Genera asientos.** Árbol Debe/Haber con NIF: provisión PPD, pago directo PUE, REP,
+   notas de crédito (E) y nómina (N). **Acredita las retenciones** (ISR/IVA) en compras.
+5. **Valida el cuadre.** Antes de escribir el TXT revisa **Debe = Haber** por póliza y
+   avisa de cuentas **PENDIENTE / sin asignar** en el Log.
+6. **Exporta los entregables:**
+   - **Excel** (`Polizas_<TIPO>_<RFC>_<AAAA>_<MM>.xlsx`) con hojas `RESUMEN`, `BASE`,
+     `POLIZAS_CONTPAQI` y (en recibidas) `DIOT_LISTA` — para que **tú revises**.
+   - **TXT de pólizas** (`Polizas_CONTPAQi_*.txt`) de ancho fijo, listo para ContpaqI.
+   - **TXT de DIOT** (formato batch del SAT, 54 columnas `|`).
+7. **Reentrena desde el Excel.** Si corriges cuentas de gasto y vuelves a cargar el Excel
+   (*Aprender de Excel Corregido*), la IA memoriza y **regenera el TXT**.
+
+Al terminar, un aviso **"Proceso completo"** te pregunta si abrir la carpeta de salida.
 
 ---
 
-## La Referencia de las pólizas: `RFC-APODO`
+## La Referencia de las pólizas: `RFC-ALIAS`
 
-La Referencia es la **clave consistente** para filtrar el reporte de **Auxiliares** cuando no se abre una cuenta por cada proveedor. Formato: `RFC-APODO`, p.ej. `CFE370814QI0-LUZ`, `TME840315KT6-TELMEX`.
+La Referencia es la **clave consistente** para filtrar el reporte de **Auxiliares**. Formato:
+`RFC-ALIAS`, p.ej. `CFE370814QI0-LUZ`, `TME840315KT6-TELMEX`.
 
-- El **RFC** va completo (12 = persona moral, 13 = persona física).
-- El **apodo** es corto, **sin espacios** (los espacios rompen el ancho fijo), sin acentos (`ñ → NI`, para evitar `Año → ANO`). Por defecto se deriva de la primera palabra del nombre del XML.
-- El **botón *Administrar Alias de Terceros*** te deja sobreescribir el apodo (CFE → LUZ, Radiomóvil → TELCEL, etc.). Se guarda en SQLite por empresa y se rellena solo conforme procesas facturas.
+- El **RFC** va completo (12 = persona moral, 13 = persona física) y en MAYÚSCULAS.
+- El **alias** es corto, **sin espacios** (rompen el ancho fijo), sin acentos. Regla de la ñ:
+  **solo `AÑO → ANIO`** (para no escribir `ANO`); las demás ñ se vuelven N normal
+  (`Muñoz → MUNOZ`). Por defecto se deriva de la primera palabra del nombre del XML.
+- Los **nombres** del XML (que vienen en MAYÚSCULAS) se muestran en *Title Case* en los
+  conceptos (`Teléfonos de México`), pero el RFC se queda en mayúsculas.
+- En **Administrar Clientes y Proveedores** sobreescribes el alias (CFE → LUZ, etc.). Se
+  guarda en SQLite por empresa y se rellena solo conforme procesas facturas.
+
+---
+
+## Cuentas: proveedores vs clientes (criterio opuesto a propósito)
+
+- **Proveedores (recibidas):** **una sola** cuenta `20101999` para todos; el detalle por
+  proveedor sale de la Referencia en Auxiliares. (Son cientos; no se abre cuenta por cada uno.)
+- **Clientes (emitidas):** cuenta **por cliente** (mapa determinista RFC→cuenta que asignas
+  en el administrador). Son pocos clientes grandes y conviene verlos separados. Quien no
+  tenga cuenta asignada cae en `10501999` (Clientes varios / público); los extranjeros en
+  `10502000`. **Esto no usa ML**: es un mapa fijo (un cliente siempre va a su misma cuenta).
 
 ---
 
@@ -38,23 +75,22 @@ La Referencia es la **clave consistente** para filtrar el reporte de **Auxiliare
 | Sale dinero (pago a proveedor, gasto pagado) | **Egreso** | `2` |
 | No mueve efectivo (provisión PPD, reclasificación, nota de crédito, nómina) | **Diario** | `3` |
 
-El tipo de póliza está ligado a Ingreso/Egreso; todo lo que no es flujo de efectivo cae en Diario.
-
 ---
 
 ## ⚠️ El TXT de ContpaqI es de ANCHO FIJO
 
-ContpaqI lee cada dato en una **columna exacta**. Si un campo se corre aunque sea 1 carácter, ContpaqI se "come" el primer dígito de los importes (`3915.00 → 915.00`), la póliza queda **descuadrada** y termina usando la **cuenta de cuadre** (`_CU-AD-RE0`) o **rechazando** el asiento.
+ContpaqI lee cada dato en una **columna exacta**. Si un campo se corre 1 carácter, se "come"
+el primer dígito de los importes (`3915.00 → 915.00`), la póliza queda **descuadrada** y
+termina en la **cuenta de cuadre** (`_CU-AD-RE0`) o **rechazada**.
 
-Mapa medido contra una exportación real de ContpaqI: el campo **cuenta ocupa 31 caracteres**, el **importe empieza en la columna 67** y el bloque fiscal `0.0` en la **columna 99**.
+Mapa medido contra una exportación real: el campo **cuenta ocupa 31 caracteres**, el
+**importe empieza en la columna 67** y el bloque fiscal `0.0` en la **columna 99**.
 
-Antes de importar, valida el archivo:
+Valida el archivo antes de importar:
 
 ```
 python validar_layout.py "ruta\Polizas_CONTPAQi_....txt"
 ```
-
-Avisa si alguna columna está corrida o si una póliza no cuadra (Cargos ≠ Abonos).
 
 ---
 
@@ -62,17 +98,17 @@ Avisa si alguna columna está corrida o si una póliza no cuadra (Cargos ≠ Abo
 
 | Archivo | Rol |
 |---|---|
-| `main.py` | Orquestador + interfaz Tkinter (botones de Emitidas/Recibidas, alias, salida y reentrenamiento). |
-| `xml_processor.py` | Parser de CFDI 4.0 (incluye REP/Pago, retenciones, IEPS, serie/folio). |
-| `sat_validator.py` | Consulta el estatus de cancelación de cada UUID en el SAT. |
-| `ml_model.py` | Pipeline de ML (TF‑IDF + OneHot + LogisticRegression). Entrena y predice la cuenta. |
-| `db.py` | SQLite por empresa (`empresas/<RFC>/conta_ml.db`): facturas, etiquetas, historial DIOT y **alias de terceros**. |
-| `export.py` | Genera el árbol Debe/Haber, el Excel, el TXT de pólizas y un TXT de DIOT acumulado. |
-| `terceros.py` | Normalización de apodos y construcción de la Referencia `RFC-APODO` (sin dependencias). |
-| `validar_layout.py` | Verificador del TXT: confirma columnas de ancho fijo y cuadre antes de importar. |
-| `diot.py` | Lógica DIOT por factura y un segundo generador de TXT batch (54 columnas). |
+| `main.py` | Orquestador + interfaz Tkinter (Emitidas/Recibidas, Clientes y Proveedores, Configuración, Aprender). |
+| `xml_processor.py` | Parser de CFDI 4.0 (REP/Pago, retenciones, IEPS, serie/folio); lee XML y ZIP y **reporta fallos**. |
+| `sat_validator.py` | Estatus de cancelación de cada UUID en el SAT. |
+| `ml_model.py` | Pipeline ML **por empresa** (TF‑IDF + OneHot + LogisticRegression) para la cuenta de gasto. |
+| `db.py` | SQLite por empresa (`empresas/<RFC>/conta_ml.db`): facturas, etiquetas, historial DIOT, y **alias/cuenta de terceros** (tipo Cliente/Proveedor). |
+| `export.py` | Árbol Debe/Haber, Excel, TXT de pólizas, validación de cuadre y aliases. |
+| `terceros.py` | Normalización de alias, Title Case y construcción de la Referencia `RFC-ALIAS`. |
+| `diot.py` | DIOT: agrega **una fila por RFC** (flujo PUE+REP) y escribe el TXT batch de 54 columnas. |
+| `validar_layout.py` | Verificador del TXT: columnas de ancho fijo y cuadre. |
 | `config.py` | `settings.json`, carga del catálogo (`cuentas.txt`) y validación de cuenta vs catálogo. |
-| `dashboard.py` | Visor opcional en Dash/Plotly (independiente del flujo principal). |
+| `dashboard.py` | Visor opcional Dash/Plotly (independiente; ver ROADMAP). |
 
 ---
 
@@ -80,20 +116,21 @@ Avisa si alguna columna está corrida o si una póliza no cuadra (Cargos ≠ Abo
 
 **Requisito:** Python 3 en el PATH.
 
-- **Windows:** doble clic en `run.bat` (crea el entorno virtual, instala dependencias y abre la app).
-- **Mac/Linux:** `./run.sh`.
+- **Windows:** doble clic en `run.bat`.  **Mac/Linux:** `./run.sh`.
+- Dependencias: `pandas`, `scikit-learn`, `requests`, `openpyxl` (y `dash`, `plotly` solo
+  para el dashboard).
 
-Dependencias: `pandas`, `scikit-learn`, `requests`, `openpyxl` (y `dash`, `plotly` solo para el dashboard).
-
-### Flujo típico
-1. *Configurar carpeta de salida* (una vez).
-2. *EMITIDAS (Ventas)* o *RECIBIDAS (Compras + DIOT)* → selecciona la carpeta de XML.
-3. *Administrar Alias de Terceros* → renombra los apodos que quieras (CFE → LUZ, etc.).
-4. Revisa el Excel. Corrige cuentas si hace falta.
-5. *Aprender de Excel Corregido* → la IA memoriza y regenera el TXT.
+### Flujo típico (resumen — detalle en `INSTRUCCIONES.md`)
+1. **Configuración** (⚙️): carpeta de salida y catálogo de cuentas (muestra su fecha).
+2. **RECIBIDAS** (compras + DIOT) o **EMITIDAS** (ventas) → elige la carpeta de XML.
+3. **Administrar Clientes y Proveedores**: alias y, para clientes, su cuenta.
+4. Revisa el Excel; corrige cuentas de gasto si hace falta.
+5. **Aprender de Excel Corregido** → la IA memoriza y regenera el TXT.
 6. `python validar_layout.py <txt>` y luego importa en ContpaqI.
 
-> **Al importar en ContpaqI** (Polizar → Cargar Pólizas / F5): "si ya existe" → **Renumerar**, *Diario en Efectivo* → en blanco, y **Cargar Sin Afectar** para revisar antes de afectar saldos.
+> **Importar en ContpaqI** (Pólizas → Cargar Pólizas / F5): "si ya existe" → **Renumerar**,
+> *Diario en Efectivo* → en blanco, **Cargar Sin Afectar**, revisar, y luego **Afectar**.
+> Pasos completos en [`INSTRUCCIONES.md`](INSTRUCCIONES.md).
 
 ---
 
@@ -103,34 +140,37 @@ Dependencias: `pandas`, `scikit-learn`, `requests`, `openpyxl` (y `dash`, `plotl
 {
   "catalogo_path": "C:\\...\\cuentas.txt",
   "output_path": "C:\\...\\salida",
+  "acredita_ieps": false,
+  "nomina_modo": "contpaqi",
   "cuentas_default": {
     "bancos": "10201001",
     "iva_acreditable": "11801000",
-    "gastos_generales": "60000000"
+    "gastos_generales": "60000000",
+    "ventas": "40101000",
+    "clientes": "10501999",
+    "clientes_extranjero": "10502000",
+    "ieps_acreditable": "",
+    "ret_isr_honorarios": "21604000",
+    "ret_iva": "21610000",
+    "ret_isr_nomina": "21601000"
   }
 }
 ```
 
-El **catálogo de cuentas** se exporta desde ContpaqI (`cuentas.txt`, tab-separado, latin1) y valida que las cuentas predichas existan. **Usa siempre cuentas afectables (de detalle), no cuentas de mayor** — p.ej. `10201001` (BBVA), no `10201000`.
+El **catálogo** se exporta de ContpaqI (`cuentas.txt`). **Usa siempre cuentas afectables
+(de detalle), no de mayor** — p.ej. `10201001` (BBVA), no `10201000`.
 
----
-
-## Criterio de IEPS (actual)
-
-Hoy el IEPS **no se separa**: queda dentro del neto del gasto (se suma al costo / base deducible de ISR), porque el contribuyente actual no es sujeto de ese impuesto. A futuro está previsto un **toggle `acredita_ieps`** por empresa que active un `if` para mandarlo a su propia cuenta.
-
----
-
-## Pendientes / roadmap
-
-- **Unificar la DIOT:** hoy se generan dos TXT con lógicas distintas (`diot.py::exportar_txt_sat` por factura con `01` final; `export.py::generar_archivo_diot_sat` acumulado por RFC sin `01`). Dejar una sola fuente de verdad.
-- **`bancos` afectable:** en `settings.json` debe ser una cuenta de detalle (`10201001`), no el mayor `10201000`.
-- **Validar Debe = Haber** por póliza antes de escribir, y avisar de cuentas `PENDIENTE`.
-- **`dashboard.py`** llama `get_conn()` sin RFC; desincronizado con la API multi-empresa.
-- **Toggle de IEPS** (arriba).
+**Toggles** (en el diálogo Configuración):
+- **`acredita_ieps`** (default *off*): si la empresa **es sujeta a IEPS**, sepáralo a su
+  cuenta (`ieps_acreditable`). Si no, déjalo apagado (el IEPS queda en el costo).
+- **`nomina_modo`** (default `contpaqi`): con CONTPAQi Nóminas la app **no** genera póliza
+  de nómina (la hace ese módulo). Ponlo en `xml` solo si quieres armarla desde el CFDI.
 
 ---
 
 ## Nota sobre la DIOT
 
-Recomendación: configurar bien ContpaqI (tipo de tercero y operación por proveedor) como **fuente principal**, y conservar el TXT de la app como **respaldo / verificación cruzada**.
+`diot.py` agrega **una fila por RFC** sobre base de **flujo** (facturas PUE pagadas + los
+REP recibidos; las PPD sin pagar no entran), con el mapa correcto de 54 columnas. Úsalo como
+respaldo y cruza contra la DIOT de ContpaqI (configurando tipo de tercero/operación por
+proveedor) como fuente principal.

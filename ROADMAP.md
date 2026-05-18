@@ -74,8 +74,15 @@ bitácora técnica: qué está hecho, qué falta y qué ideas están "madurando"
 - **Módulo de cantidades mensuales de nómina**: alternativa al parseo, para clientes con
   sistemas de nómina de terceros (Aspel, Excel) cuyos XML vienen incompletos. Decidir
   parse-XML vs. captura manual según la calidad real de los datos de ese cliente.
-- **Clasificador de ventas** por producto/cliente (hoy todas las ventas van a una sola
-  cuenta de Ventas).
+- **Modo "póliza concentradora"** (opcional, sobre todo para comercializar): generar UNA
+  póliza que agrupe varias facturas (p.ej. por día/tipo/cuenta) en vez de una por CFDI.
+  HOY el default (una póliza por UUID) es el mejor: máxima trazabilidad póliza↔UUID↔XML, y
+  200-400/mes no es problema para ContpaqI. El argumento de "menos pólizas" es herencia de
+  la captura manual; un generador lo elimina. INCÓGNITA TÉCNICA a probar ANTES de
+  construirlo: si ContpaqI importa bien VARIAS líneas `AD <UUID>` dentro de un mismo bloque
+  `P` (hoy cada M1 lleva su AD); de eso depende que el modo sea viable y que la contabilidad
+  electrónica reciba los UUID. Excepción legítima donde concentrar SÍ es normal: ventas a
+  público general (factura global) como una póliza de ingreso diaria/mensual.
 - **Pestaña Clientes/Proveedores** en el administrador de alias (requiere etiquetar el rol
   del RFC en la tabla; hoy la lista única ya funciona).
 - **IEPS por empresa** (hoy el flag es global en settings.json) y manejo de IEPS en

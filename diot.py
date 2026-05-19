@@ -135,7 +135,26 @@ def generar_diot(df):
         if ret_iva:
             s["RetIVA"] += ret_iva
 
-    filas = list(acc.values())
+    # Omitir terceros SIN IVA/base/retención: no son operaciones de proveedor con IVA
+    # (p.ej. derechos/contribuciones de gobierno: ISN, IMSS, INFONAVIT, derechos estatales).
+    # La DIOT (LIVA 32 / RLIVA 59) es solo para operaciones con proveedores que llevan IVA.
+    # OJO: se REPORTA en el Log qué se omitió, para que el usuario verifique que ninguno
+    # sea en realidad un proveedor EXENTO (renta/servicios médicos) que sí debería ir.
+    filas, omitidos = [], []
+    for v in acc.values():
+        montos = (v["Base16"], v["DDB16"], v["IVA_Acred16"], v["Base8"],
+                  v["IVA_Acred8"], v["BaseExento"], v["Base0"], v["RetIVA"])
+        if all(abs(x) < 0.005 for x in montos):
+            omitidos.append((v["RFC"], v["Nombre"]))
+        else:
+            filas.append(v)
+
+    if omitidos:
+        print(f"[AVISO] {len(omitidos)} tercero(s) SIN IVA/base omitidos de la DIOT "
+              f"(no son operaciones de proveedor con IVA; revisa si alguno es proveedor EXENTO):")
+        for rfc, nom in omitidos:
+            print(f"   - {rfc}  {str(nom)[:45]}")
+
     return pd.DataFrame(filas)
 
 

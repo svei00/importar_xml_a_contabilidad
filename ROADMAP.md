@@ -48,7 +48,12 @@ bitácora técnica: qué está hecho, qué falta y qué ideas están "madurando"
   como CFDI recibido sin IVA; ya se asientan por el flujo normal, pero caen en
   gastos_generales. Mapear sus RFC a su cuenta de gasto. (Falta un XML de muestra.)
 - **dashboard.py** roto: llama `get_conn()` sin RFC (API multi-empresa actual lo requiere).
-- **Capturar `iva_exento`** en el parser (hoy siempre 0) → columnas exento/0% de la DIOT.
+- **Capturar EXENTO / 0% de PROVEEDORES** en el parser (hoy `iva_exento` siempre 0) → para
+  reportar en la DIOT col 18 (exento) / 19 (0%) / 22 (no objeto) los proveedores EXENTOS
+  legítimos (renta exenta, servicios médicos exentos). Necesita un XML de ejemplo de un
+  proveedor exento. (Distinto de las contribuciones de gobierno, que NO van a la DIOT.)
+  HECHO ya: las filas DIOT sin IVA/base/retención se OMITEN y se reportan en el Log
+  (excluye correctamente derechos/ISN/IMSS/INFONAVIT; fundamento LIVA 32 / RLIVA 59).
 - **Crear subcuentas de clientes en ContpaqI** (tarea del usuario): 10501001/002 (clientes
   grandes), 10501003/004 (distribuidora), 10501999 (varios/público). Hoy 10501000 es la
   afectable; al abrir hijas se vuelve mayor.

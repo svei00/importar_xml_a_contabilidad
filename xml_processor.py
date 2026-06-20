@@ -81,7 +81,9 @@ def parse_xml(source):
 
     if tipo == "P":
         total = monto_pago_rep
-        concepto = f"Pago a UUID: {doctos_relacionados[0][:8]}..." if doctos_relacionados else "REP de Pago"
+        # El UUID en el concepto se ve feo en el Listado de Pólizas; la trazabilidad
+        # vive en la Referencia (RFC-APODO), el XML asociado (AD) y el Excel.
+        concepto = "Complemento de Pago (REP)"
         referencia_xml = doctos_relacionados[0][:8] if doctos_relacionados else "REP"
     elif not metodo_pago:
         metodo_pago = "PUE" 

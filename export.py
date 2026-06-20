@@ -21,7 +21,14 @@ def generar_polizas(df, is_egresos, aliases=None):
     c_ventas = cuentas.get("ventas", "40101000")
     c_iva_cobrado = cuentas.get("iva_trasladado", "20801000")
     c_iva_pdte_cobro = cuentas.get("iva_pdte_cobro", "20901000")
-    
+
+    # IEPS acreditable (toggle). Por defecto OFF: el IEPS se queda en el costo
+    # (correcto para un contribuyente NO sujeto a IEPS). Si se activa y hay cuenta
+    # configurada, el IEPS se separa del neto y se lleva a su propia cuenta
+    # acreditable en compras PUE. Ver [[importar-xml-contpaqi]].
+    c_ieps = str(cuentas.get("ieps_acreditable", "")).strip()
+    ieps_activo = bool(settings.get("acredita_ieps", False)) and c_ieps not in ("", "0")
+
     aliases = aliases or {}
     pol = []
     num = 1
@@ -64,6 +71,7 @@ def generar_polizas(df, is_egresos, aliases=None):
         tot = float(r["total"])
         iva = float(r["iva_16"]) + float(r["iva_8"])
         ret = float(r["ret_iva"]) + float(r["ret_isr"])
+        ieps = float(r.get("ieps", 0) or 0)
         neto = round(tot - iva + ret, 2)
         
         # Asientos Contables Automatizados
@@ -75,7 +83,10 @@ def generar_polizas(df, is_egresos, aliases=None):
                     if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_pago, ref, iva, 0, "IVA pendiente de pago", uuid])
                     pol.append([num, "Diario", fecha_limpia, c_proveedores, ref, 0, tot, prov, uuid])
                 else:
-                    pol.append([num, "Egreso", fecha_limpia, c_principal, ref, neto, 0, concepto, uuid])
+                    neto_pue = round(neto - ieps, 2) if ieps_activo else neto
+                    pol.append([num, "Egreso", fecha_limpia, c_principal, ref, neto_pue, 0, concepto, uuid])
+                    if ieps_activo and ieps > 0:
+                        pol.append([num, "Egreso", fecha_limpia, c_ieps, ref, ieps, 0, "IEPS acreditable", uuid])
                     if iva > 0: pol.append([num, "Egreso", fecha_limpia, c_iva_pagado, ref, iva, 0, "IVA acreditable", uuid])
                     pol.append([num, "Egreso", fecha_limpia, c_banco, ref, 0, tot, prov, uuid])
             else:
@@ -346,6 +357,23 @@ def sincronizar_aliases(empresa_rfc, df, is_egresos):
         ensure_alias(empresa_rfc, rfc, nombre, normalizar_shortname(nombre))
     return get_aliases(empresa_rfc)
 
+def validar_balance_polizas(polizas_df, tol=0.01):
+    """Revisa el cuadre Debe=Haber por póliza y detecta cuentas sin asignar ANTES
+    de escribir el TXT (CONTPAQi rechaza pólizas descuadradas y crea cuenta de cuadre).
+    Devuelve (descuadres, pendientes) para avisar al usuario."""
+    descuadres = []
+    for num, g in polizas_df.groupby("Numero"):
+        debe = float(pd.to_numeric(g["Debe"], errors="coerce").fillna(0).sum())
+        haber = float(pd.to_numeric(g["Haber"], errors="coerce").fillna(0).sum())
+        if abs(debe - haber) > tol:
+            con = str(g.iloc[0]["Concepto"])[:40]
+            descuadres.append((num, round(debe, 2), round(haber, 2), round(debe - haber, 2), con))
+    ctas = polizas_df["Cuenta"].astype(str).str.strip().str.upper()
+    mask = ctas.isin(["PENDIENTE", "NAN", "0", ""]) | ctas.str.contains("FALTA", na=False)
+    pendientes = sorted(set(polizas_df.loc[mask, "Cuenta"].astype(str)))
+    return descuadres, pendientes
+
+
 def exportar(df, diot_df, output_dir, filename, log_data):
     filepath = os.path.join(output_dir, filename)
     is_egresos = "EGRESOS" in filename.upper()
@@ -363,15 +391,31 @@ def exportar(df, diot_df, output_dir, filename, log_data):
 
     polizas_df = generar_polizas(df, is_egresos, aliases)
 
+    # Cuadre Debe=Haber + cuentas sin asignar ANTES de escribir el TXT.
+    descuadres, pendientes = validar_balance_polizas(polizas_df)
+    if descuadres:
+        print(f"[AVISO] {len(descuadres)} póliza(s) DESCUADRADA(S) (Debe != Haber):")
+        for num, d, h, dif, con in descuadres:
+            print(f"   Póliza {num}: Debe={d} Haber={h} dif={dif}  [{con}]")
+    if pendientes:
+        print(f"[AVISO] Cuentas sin asignar (corrige antes de importar): {', '.join(pendientes)}")
+    if not descuadres and not pendientes:
+        print("[OK] Todas las pólizas cuadran (Debe = Haber); sin cuentas pendientes.")
+
     with pd.ExcelWriter(filepath, engine='openpyxl') as w:
         res_df.to_excel(w, sheet_name="RESUMEN", index=False)
         auto_ajustar_columnas(w, "RESUMEN", res_df)
-        
+
         df.to_excel(w, sheet_name="BASE", index=False)
         auto_ajustar_columnas(w, "BASE", df)
-        
+
         polizas_df.to_excel(w, sheet_name="POLIZAS_CONTPAQI", index=False)
         auto_ajustar_columnas(w, "POLIZAS_CONTPAQI", polizas_df)
+
+        # DIOT agregada (una fila por RFC) para revisión humana — solo egresos.
+        if diot_df is not None and not diot_df.empty:
+            diot_df.to_excel(w, sheet_name="DIOT_LISTA", index=False)
+            auto_ajustar_columnas(w, "DIOT_LISTA", diot_df)
             
     # Solo se genera el TXT de pólizas aquí. La DIOT se produce UNA sola vez
     # desde diot.py (main.py -> exportar_txt_sat) para no duplicar archivos

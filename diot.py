@@ -1,129 +1,207 @@
 import pandas as pd
 import os
 
+# ---------------------------------------------------------------------------
+# DIOT 2025 (carga por lotes, 54 columnas separadas por pipe).
+#
+# Reglas clave (confirmadas con el usuario / spec SAT 2025):
+#   * UNA fila por RFC de proveedor (agregado del mes), no una por factura.
+#   * Base CONTABLE = flujo de efectivo (PUE pagadas en el mes + REP recibidos).
+#     Las PPD NO pagadas (sin REP) NO se incluyen; entran cuando llega su pago.
+#   * Notas de crédito recibidas (tipo E) -> Devoluciones/Descuentos/Bonif. (DDB).
+#   * Col 54 = "1" (Sí se cuenta con el CFDI).
+#
+# Mapa de columnas (1-index del SAT -> 0-index de Python):
+#   1  c[0]  Tipo de tercero (04/05/15)
+#   2  c[1]  Tipo de operación (02/03/06/85/87…)
+#   3  c[2]  RFC (04/15; vacío en 05)
+#   4  c[3]  ID fiscal extranjero (05)
+#   5  c[4]  Nombre extranjero (05)
+#   6  c[5]  País (05)
+#   7  c[6]  Lugar jurisdicción fiscal (05)
+#   8  c[7]  Base pagada RFN 8%
+#   9  c[8]  DDB RFN 8%
+#  10  c[9]  Base pagada RFS 8%
+#  11  c[10] DDB RFS 8%
+#  12  c[11] Base pagada tasa general 16%        <-- principal
+#  13  c[12] DDB tasa general 16%                <-- notas de crédito
+#  18  c[17] Base actos pagados Exentos
+#  19  c[18] Base actos pagados tasa 0%
+#  29  c[28] IVA Acreditable RFN 8%
+#  31  c[30] IVA Acreditable tasa general 16%    <-- principal
+#  48  c[47] IVA retenido por el contribuyente
+#  54  c[53] Efectos fiscales del comprobante = "1"
+# (las demás reservadas: van vacías pero con su pipe).
+# ---------------------------------------------------------------------------
+
+TASA_16 = 0.16
+TASA_8 = 0.08
+
+
 def determinar_tipo_tercero(rfc):
     rfc = str(rfc).strip().upper()
-    if rfc == "XEXX010101000": 
-        return "05" # Proveedor Extranjero
-    elif rfc == "XAXX010101000": 
-        return "15" # Proveedor Global
-    return "04" # Proveedor Nacional
+    if rfc == "XEXX010101000":
+        return "05"  # Extranjero
+    if rfc == "XAXX010101000":
+        return "15"  # Global (público en general)
+    return "04"      # Nacional
+
 
 def determinar_tipo_operacion(concepto, tipo_tercero):
     """
-    Cruza el concepto con el tipo de tercero según las reglas ESTRICTAS del SAT (Páginas 4 y 5).
+    Tipo de operación según las reglas del SAT.
+    NOTA: el código de 'Otros' para nacionales es 85 (no 08). El resumen de
+    blog que circula usa 08; el código oficial histórico/SAT es 85. Se deja 85.
     """
-    concepto_lower = str(concepto).lower()
-    
-    # 1. Regla Proveedor Global (15) -> SOLO acepta 87
+    cl = str(concepto).lower()
     if tipo_tercero == "15":
-        return "87" 
-        
-    # 2. Regla Proveedor Extranjero (05) -> SOLO acepta 02, 03, 07
+        return "87"  # Global -> solo 87
     if tipo_tercero == "05":
-        if "servicio" in concepto_lower or "honorario" in concepto_lower: 
-            return "03" # Prestación de Servicios Profesionales
-        elif "importación" in concepto_lower or "aduana" in concepto_lower: 
-            return "07" # Importación de bienes o servicios
-        else: 
-            return "02" # Enajenación de bienes (Por defecto)
-            
-    # 3. Regla Proveedor Nacional (04) -> Acepta 02, 03, 06, 08, 85
-    if "arrendamiento" in concepto_lower or "renta" in concepto_lower: 
-        return "06" # Uso o goce temporal
-    elif "honorarios" in concepto_lower or "servicios profesionales" in concepto_lower: 
-        return "03" # Prestación de Servicios Profesionales
-    return "85" # Otros (El más común)
+        if "servicio" in cl or "honorario" in cl:
+            return "03"
+        if "importaci" in cl or "aduana" in cl:
+            return "07"
+        return "02"
+    # Nacional (04): acepta 02, 03, 06, 85
+    if "arrendamiento" in cl or "renta" in cl:
+        return "06"
+    if "honorarios" in cl or "servicios profesionales" in cl:
+        return "03"
+    return "85"  # Otros (el más común)
+
 
 def generar_diot(df):
     """
-    Genera el DataFrame que el usuario verá en el Excel (Pestaña DIOT_LISTA).
+    Agrega los comprobantes RECIBIDOS en UNA fila por (tipo_tercero, tipo_operacion, RFC)
+    sobre base de FLUJO (PUE pagadas + REP), devolviendo el DataFrame que se ve en el
+    Excel (pestaña DIOT_LISTA) y que consume exportar_txt_sat.
     """
-    filas = []
+    acc = {}  # clave -> dict agregado
+
+    def slot(tipo_tercero, tipo_op, rfc, nombre):
+        key = (tipo_tercero, tipo_op, str(rfc).strip().upper())
+        if key not in acc:
+            acc[key] = {
+                "TipoTercero": tipo_tercero,
+                "TipoOperacion": tipo_op,
+                "RFC": str(rfc).strip().upper(),
+                "Nombre": str(nombre),
+                "Base16": 0.0, "DDB16": 0.0, "IVA_Acred16": 0.0,
+                "Base8": 0.0, "IVA_Acred8": 0.0,
+                "BaseExento": 0.0, "Base0": 0.0,
+                "RetIVA": 0.0,
+            }
+        return acc[key]
+
     for _, r in df.iterrows():
-        # Excluir Nóminas, Pagos y Traslados
-        if r["tipo"] in ["N", "P", "T"]: 
+        tipo = str(r.get("tipo", "")).strip().upper()
+        metodo = str(r.get("metodo_pago", "")).strip().upper()
+
+        # Nóminas y traslados nunca van a DIOT.
+        if tipo in ("N", "T"):
             continue
-            
-        tipo_tercero = determinar_tipo_tercero(r["rfc_emisor"])
-        tipo_operacion = determinar_tipo_operacion(r["concepto"], tipo_tercero) 
-        
-        filas.append({
-            "TipoTercero": tipo_tercero,   
-            "TipoOperacion": tipo_operacion, 
-            "RFC": r["rfc_emisor"],
-            "Nombre": r["nombre_emisor"],
-            "IVA_16_Monto": r["iva_16"],
-            "IVA_8_Monto": r["iva_8"],
-            "Base_Exenta": r["iva_exento"],
-            "Retencion_IVA": r["ret_iva"],
-            "ImporteTotal": r["total"]
-        })
+        # PPD sin pagar (factura I marcada PPD) NO entra: entrará vía su REP.
+        if tipo == "I" and metodo == "PPD":
+            continue
+        # Solo cuentan: facturas PUE (pagadas) y los REP (tipo P).
+        if tipo not in ("I", "P", "E"):
+            continue
+
+        rfc = r.get("rfc_emisor", "")
+        nombre = r.get("nombre_emisor", "")
+        tt = determinar_tipo_tercero(rfc)
+        top = determinar_tipo_operacion(r.get("concepto", ""), tt)
+        s = slot(tt, top, rfc, nombre)
+
+        iva16 = float(r.get("iva_16", 0) or 0)
+        iva8 = float(r.get("iva_8", 0) or 0)
+        ret_iva = float(r.get("ret_iva", 0) or 0)
+        exento = float(r.get("iva_exento", 0) or 0)
+
+        if tipo == "E":
+            # Nota de crédito recibida -> Devoluciones/Descuentos/Bonificaciones.
+            s["DDB16"] += iva16 / TASA_16 if iva16 else 0.0
+            continue
+
+        # Facturas PUE y REP: suman a la base acreditable del mes.
+        if iva16:
+            s["Base16"] += iva16 / TASA_16
+            s["IVA_Acred16"] += iva16
+        if iva8:
+            s["Base8"] += iva8 / TASA_8
+            s["IVA_Acred8"] += iva8
+        if exento:
+            s["BaseExento"] += exento
+        if ret_iva:
+            s["RetIVA"] += ret_iva
+
+    filas = list(acc.values())
     return pd.DataFrame(filas)
+
+
+def _ent(x):
+    """Entero en pesos (DIOT por lotes no lleva decimales). Vacío si es 0."""
+    try:
+        n = int(round(float(x)))
+    except (TypeError, ValueError):
+        return ""
+    return str(n) if n != 0 else ""
+
 
 def exportar_txt_sat(df_diot, mes, anio, tipo_decl, output_dir):
     """
-    Exporta el TXT de Carga Batch (Enero 2025) de EXACTAMENTE 54 COLUMNAS.
+    Escribe el TXT de carga por lotes (54 columnas, pipe). Una línea por fila ya
+    agregada de generar_diot. Devuelve la ruta del archivo (o None si vacío).
     """
-    if df_diot.empty:
-        return
-        
-    meses_str = {"01":"Ene", "02":"Feb", "03":"Mar", "04":"Abr", "05":"May", "06":"Jun", 
-                 "07":"Jul", "08":"Ago", "09":"Sep", "10":"Oct", "11":"Nov", "12":"Dic"}
-    
-    mes_str = str(mes).zfill(2) 
+    if df_diot is None or df_diot.empty:
+        print("[AVISO] DIOT vacía: no se generó archivo.")
+        return None
+
+    meses_str = {"01": "Ene", "02": "Feb", "03": "Mar", "04": "Abr", "05": "May",
+                 "06": "Jun", "07": "Jul", "08": "Ago", "09": "Sep", "10": "Oct",
+                 "11": "Nov", "12": "Dic"}
+    mes_str = str(mes).zfill(2)
     nombre_mes = meses_str.get(mes_str, "Mes")
-    
     filename = f"{mes_str}. {nombre_mes} {anio} {tipo_decl} DIOT.txt"
     filepath = os.path.join(output_dir, filename)
-    
-    with open(filepath, 'w', encoding='utf-8') as f:
+
+    n = 0
+    with open(filepath, "w", encoding="utf-8") as f:
         for _, r in df_diot.iterrows():
-            # Inicializamos un arreglo de 54 posiciones vacías ("")
-            # En Python, el índice empieza en 0. (Columna 1 = c[0], Columna 54 = c[53])
             c = [""] * 54
-            
-            tipo_tercero = r.get('TipoTercero', '04')
-            c[0] = tipo_tercero                        # Col 1: Tipo de tercero
-            c[1] = r.get('TipoOperacion', '85')        # Col 2: Tipo de operación
-            
-            # Col 3: RFC (Obligatorio para 04 y 15, vacío para 05)
-            if tipo_tercero in ["04", "15"]:
-                c[2] = r.get('RFC', '')
-                
-            # Col 4, 5, 6, 7: Datos de Extranjeros (Solo si es 05)
-            if tipo_tercero == "05":
-                c[3] = ""                              # Col 4: ID Fiscal
-                c[4] = str(r.get('Nombre', ''))[:300]  # Col 5: Nombre Extranjero (Max 300)
-                c[5] = "US"                            # Col 6: País (Por defecto ponemos US para no dejarlo vacío)
 
-            # --- VALORES AL 16% ---
-            iva_16 = float(r.get('IVA_16_Monto', 0))
-            if iva_16 > 0:
-                c[11] = str(int(round(iva_16 / 0.16))) # Col 12: Base actos pagados 16%
-                c[21] = str(int(round(iva_16)))        # Col 22: IVA Acreditable 16%
+            tt = str(r.get("TipoTercero", "04"))
+            c[0] = tt                                  # 1 Tipo tercero
+            c[1] = str(r.get("TipoOperacion", "85"))   # 2 Tipo operación
 
-            # --- VALORES AL 8% (Frontera) ---
-            iva_8 = float(r.get('IVA_8_Monto', 0))
-            if iva_8 > 0:
-                c[7] = str(int(round(iva_8 / 0.08)))   # Col 8: Base actos pagados Frontera
-                c[17] = str(int(round(iva_8)))         # Col 18: IVA Acreditable Frontera
+            if tt in ("04", "15"):
+                c[2] = str(r.get("RFC", ""))           # 3 RFC nacional/global
+            elif tt == "05":
+                c[4] = str(r.get("Nombre", ""))[:300]  # 5 Nombre extranjero
+                c[5] = "US"                            # 6 País (default)
 
-            # --- RETENCIONES ---
-            ret_iva = float(r.get('Retencion_IVA', 0))
-            if ret_iva > 0:
-                c[47] = str(int(round(ret_iva)))       # Col 48: IVA retenido por el contribuyente
+            # --- Tasa general 16% ---
+            c[11] = _ent(r.get("Base16"))              # 12 Base 16%
+            c[12] = _ent(r.get("DDB16"))               # 13 DDB 16%
+            c[30] = _ent(r.get("IVA_Acred16"))         # 31 IVA acreditable 16%
 
-            # --- EXENTOS ---
-            exento = float(r.get('Base_Exenta', 0))
-            if exento > 0:
-                c[49] = str(int(round(exento)))        # Col 50: Actos pagados por los que no se pagará el IVA (Exentos)
+            # --- 8% (frontera; este cliente normalmente no lo usa).
+            # Sin dato RFN/RFS se asume RFN por defecto. Ver [[importar-xml-contpaqi]].
+            c[7] = _ent(r.get("Base8"))                # 8 Base RFN 8%
+            c[28] = _ent(r.get("IVA_Acred8"))          # 29 IVA acreditable RFN 8%
 
-            # --- MANIFIESTO FINAL ---
-            c[53] = "01"                               # Col 54: Manifiesto que se dio efectos fiscales (01 = Sí)
+            # --- Exentos / tasa 0% (hoy 0: el parser no captura iva_exento aún).
+            c[17] = _ent(r.get("BaseExento"))          # 18 Base exentos
+            c[18] = _ent(r.get("Base0"))               # 19 Base 0%
 
-            # Unimos las 54 posiciones con el separador de pipe (|)
-            linea = "|".join(c) + "\n"
-            f.write(linea)
-            
-    print(f"✅ Archivo TXT DIOT Carga Masiva (54 columnas) generado: {filename}")
+            # --- Retención de IVA hecha por el contribuyente.
+            c[47] = _ent(r.get("RetIVA"))              # 48 IVA retenido
+
+            # --- Manifiesto: sí se cuenta con el CFDI.
+            c[53] = "1"                                # 54 Efectos fiscales
+
+            f.write("|".join(c) + "\n")
+            n += 1
+
+    print(f"[OK] DIOT (54 col, {n} terceros agregados) generada: {filename}")
+    return filepath

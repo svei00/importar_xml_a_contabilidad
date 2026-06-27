@@ -58,9 +58,12 @@ bitácora técnica: qué está hecho, qué falta y qué ideas están "madurando"
 - **README.md desactualizado**: predata todo el trabajo reciente (dice "ñ→NI", "Administrar
   Alias de Terceros", IEPS sin separar, DIOT doble como pendiente, roadmap viejo). Refrescar.
   La guía de uso del día a día ya vive en `INSTRUCCIONES.md` (incl. importar/afectar en ContpaqI).
-- **Robustez `load_folder`**: hoy `except: pass` traga XML mal formados en silencio → se puede
-  perder una factura sin avisar. Cambiar para REGISTRAR en el Log qué archivos fallaron.
-  (Recomendado antes de usar la app sin supervisión por meses.)
+- **Nota de Crédito (tipo E) vs IVA pagado**: el asiento de NC reversa las cuentas de IVA
+  PENDIENTE (`iva_pdte_pago`/`iva_pdte_cobro`), correcto SOLO si el comprobante original era
+  PPD aún sin pagar. Si la NC es contra una PUE (IVA ya acreditable/trasladado) o una PPD ya
+  pagada por REP (IVA ya reclasificado), se reversa la cuenta equivocada y queda un fantasma
+  en pendientes. Revisar el patrón real de NCs del cliente y, si llegan después del pago,
+  rutear la pierna de IVA a la cuenta acreditable/trasladado. (export.py ~131-141.)
 
 ## 💡 Ideas por madurar (sin compromiso)
 

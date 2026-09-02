@@ -15,6 +15,8 @@ from config import load_settings, save_settings
 # Valores por defecto de las llaves nuevas (si la empresa no define la suya).
 VALORES_POR_DEFECTO = {
     "conceptos_ascii": True,   # regla H: conceptos del TXT en ASCII puro
+    # RFC de emisores cuyo folio trae la fecha de pago embebida (IMSS: A-AAAAMM-REG-DDMMAAAA-LINEA).
+    "rfcs_con_fecha_en_folio": ["IMS421231I45"],
 }
 
 

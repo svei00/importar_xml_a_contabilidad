@@ -116,7 +116,12 @@ def generar_polizas(df, is_egresos, aliases=None, cuentas_clientes=None):
         concepto_pago = f"Pago a {nombre_tercero}".strip()[:100] if nombre_tercero else (desc[:100] or "Pago")
         concepto_cobro = f"Cobro de {nombre_tercero}".strip()[:100] if nombre_tercero else (desc[:100] or "Cobro")
 
-        fecha_limpia = str(r.get("fecha", "2026-01-01")).split("T")[0]
+        # Caso C: las reglas ya decidieron la fecha de la poliza (fecha de pago del REP, etc.).
+        fecha_limpia = (_texto_o_vacio(r.get("fecha_poliza"))
+                        or str(r.get("fecha", "2026-01-01")).split("T")[0])
+        # Caso B: tipo de poliza y cuenta de la contrapartida segun la forma de pago (compras).
+        tipo_egreso = _texto_o_vacio(r.get("tipo_poliza")) or "Egreso"
+        c_banco_compras = _texto_o_vacio(r.get("cuenta_contrapartida")) or c_banco
         c_asignada = str(r.get("cuenta", "PENDIENTE")).strip()
         c_principal = c_asignada if c_asignada not in ["", "0", "PENDIENTE", "nan"] else "PENDIENTE"
         
@@ -141,13 +146,13 @@ def generar_polizas(df, is_egresos, aliases=None, cuentas_clientes=None):
                     pol.append([num, "Diario", fecha_limpia, c_prov_row, ref, 0, tot, prov, uuid])
                 else:
                     neto_pue = round(neto - ieps, 2) if ieps_activo else neto
-                    pol.append([num, "Egreso", fecha_limpia, c_principal, ref, neto_pue, 0, concepto, uuid])
+                    pol.append([num, tipo_egreso, fecha_limpia, c_principal, ref, neto_pue, 0, concepto, uuid])
                     if ieps_activo and ieps > 0:
-                        pol.append([num, "Egreso", fecha_limpia, c_ieps, ref, ieps, 0, "IEPS acreditable", uuid])
-                    if iva > 0: pol.append([num, "Egreso", fecha_limpia, c_iva_pagado, ref, iva, 0, "IVA acreditable", uuid])
-                    if ret_isr_v > 0: pol.append([num, "Egreso", fecha_limpia, c_ret_isr_hon, ref, 0, ret_isr_v, "Retención ISR por pagar", uuid])
-                    if ret_iva_v > 0: pol.append([num, "Egreso", fecha_limpia, c_ret_iva, ref, 0, ret_iva_v, "Retención IVA por pagar", uuid])
-                    pol.append([num, "Egreso", fecha_limpia, c_banco, ref, 0, tot, prov, uuid])
+                        pol.append([num, tipo_egreso, fecha_limpia, c_ieps, ref, ieps, 0, "IEPS acreditable", uuid])
+                    if iva > 0: pol.append([num, tipo_egreso, fecha_limpia, c_iva_pagado, ref, iva, 0, "IVA acreditable", uuid])
+                    if ret_isr_v > 0: pol.append([num, tipo_egreso, fecha_limpia, c_ret_isr_hon, ref, 0, ret_isr_v, "Retención ISR por pagar", uuid])
+                    if ret_iva_v > 0: pol.append([num, tipo_egreso, fecha_limpia, c_ret_iva, ref, 0, ret_iva_v, "Retención IVA por pagar", uuid])
+                    pol.append([num, tipo_egreso, fecha_limpia, c_banco_compras, ref, 0, tot, prov, uuid])
             else:
                 cli = nombre_tercero[:50]
                 c_principal = c_principal if c_principal != "PENDIENTE" else c_ventas
@@ -177,11 +182,11 @@ def generar_polizas(df, is_egresos, aliases=None, cuentas_clientes=None):
             lineas_pago = _leer_aplicaciones_pago(r, tot, c_prov_row if rol == "purchase" else c_cliente_row)
             if rol == "purchase":
                 for cuenta_factura, importe in lineas_pago:
-                    pol.append([num, "Egreso", fecha_limpia, cuenta_factura, ref, importe, 0, concepto_pago, uuid])
-                pol.append([num, "Egreso", fecha_limpia, c_banco, ref, 0, tot, "Pago a proveedor", uuid])
+                    pol.append([num, tipo_egreso, fecha_limpia, cuenta_factura, ref, importe, 0, concepto_pago, uuid])
+                pol.append([num, tipo_egreso, fecha_limpia, c_banco_compras, ref, 0, tot, "Pago a proveedor", uuid])
                 if iva > 0:
-                    pol.append([num, "Egreso", fecha_limpia, c_iva_pagado, ref, iva, 0, "Reclasificación IVA acreditable", uuid])
-                    pol.append([num, "Egreso", fecha_limpia, c_iva_pdte_pago, ref, 0, iva, "Cancelación IVA pendiente", uuid])
+                    pol.append([num, tipo_egreso, fecha_limpia, c_iva_pagado, ref, iva, 0, "Reclasificación IVA acreditable", uuid])
+                    pol.append([num, tipo_egreso, fecha_limpia, c_iva_pdte_pago, ref, 0, iva, "Cancelación IVA pendiente", uuid])
             else:
                 pol.append([num, "Ingreso", fecha_limpia, c_banco, ref, tot, 0, "Cobro de cliente", uuid])
                 for cuenta_factura, importe in lineas_pago:
@@ -465,7 +470,9 @@ def ordenar_por_fecha(df):
     Fechas vacias o invalidas se mandan al final en vez de tronar el export.
     """
     df = df.copy()
-    df["_fecha_orden"] = pd.to_datetime(df["fecha"], errors="coerce")
+    # La fecha de poliza (Fase 3) manda; si la columna no existe se usa la de emision.
+    columna_fecha = "fecha_poliza" if "fecha_poliza" in df.columns else "fecha"
+    df["_fecha_orden"] = pd.to_datetime(df[columna_fecha], errors="coerce")
     df = df.sort_values(
         by=["_fecha_orden", "uuid"],
         ascending=True,

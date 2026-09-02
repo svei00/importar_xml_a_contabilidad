@@ -586,7 +586,12 @@ Implicaciones para el diseño de la Fase 7:
 - HECHO: `cuentas.txt` re-exportado (NextCloud, 20/10/2026 16:24; trae 20101002 y 20501002),
   balanzas de julio y agosto en `stuff/`, estados de cuenta en `stuff/`.
 - Fase 1 HECHA (rama `fase-1-cimientos-mes-vacio`). Fase 2 HECHA (rama
-  `fase-2-registro-contabilizados`).
+  `fase-2-registro-contabilizados`). Fase 3 HECHA (rama `fase-3-fecha-y-forma-de-pago`):
+  `fecha_de_poliza.py` y `formas_de_pago.py`. Valores por defecto en el codigo: formas 02, 03 y 99
+  contra banco (la 99 avisa); `rfcs_con_fecha_en_folio` = IMSS. El mapa de EEA (04 y 28 ->
+  20501002, Diario) se escribio en `settings.json` -> `empresas.EEA251205CR8.formas_pago`
+  (respaldo previo en el scratchpad de la sesion). Una forma sin mapear (p. ej. 01 efectivo)
+  deja la contrapartida PENDIENTE con excepcion BLOQUEANTE: agrega su cuenta cuando aparezca.
 - Antes de correr un mes real con la Fase 2: (a) botón "📚 Sembrar historial…" con la
   carpeta del mes anterior (y los meses que puedan traer reexpediciones), (b) en
   "Administrar Clientes y Proveedores": CFE370814QI0 → Cuenta tercero 20101002.

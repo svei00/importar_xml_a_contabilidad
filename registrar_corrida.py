@@ -41,8 +41,10 @@ def _documento_desde_fila(fila, es_egresos):
         "folio": fila.get("folio", ""),
         "total": fila.get("total", 0),
         "fecha_cfdi": fecha,
-        "fecha_poliza": fecha,   # la Fase 3 la reemplaza por la fecha real de pago
+        "fecha_poliza": fila.get("fecha_poliza") or fecha,
+        "tipo_poliza": fila.get("tipo_poliza") or None,
         "cuenta_principal": fila.get("cuenta", ""),
+        "cuenta_contrapartida": fila.get("cuenta_contrapartida") or None,
         "cuenta_tercero": fila.get("cuenta_tercero") or None,
         "resultado": _resultado_de_la_fila(fila),
         "documento_original_uuid": fila.get("documento_original_uuid") or None,

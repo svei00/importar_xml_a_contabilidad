@@ -20,6 +20,10 @@ el registro de lo ya contabilizado):
   cuenta_tercero           donde vive el saldo del proveedor/cliente (caso A)
   aplicaciones_pago        para un REP: texto JSON con que factura cancela cada
                            linea y contra que cuenta (caso A)
+Fase 3 agrega:
+  fecha_poliza             fecha del pago (REP) o de pago embebida en el folio del IMSS (caso C)
+  tipo_poliza              Egreso o Diario segun la forma de pago (caso B)
+  cuenta_contrapartida     banco, cuenta del socio (tarjeta) o PENDIENTE (caso B)
 Las fases siguientes agregan sus reglas en aplicar_reglas(), una despues de otra.
 
 Sin Tkinter ni ventanas: solo datos adentro, datos afuera.
@@ -32,6 +36,9 @@ from periodo_lote import periodo_de_fecha, determinar_periodo, filas_fuera_de_pe
 from detector_reexpediciones import detectar_reexpediciones
 from cuenta_de_tercero import (cuenta_para_documento_nuevo, resolver_cuenta_de_documento,
                                armar_aplicaciones_pago)
+from fecha_de_poliza import (decidir_fecha_poliza, avisar_si_el_pago_es_de_otro_periodo,
+                             avisar_saldo_insoluto)
+from formas_de_pago import necesita_contrapartida, decidir_contrapartida
 
 MOTIVO_CANCELADO = "cancelado"
 MOTIVO_NOMINA = "nomina"
@@ -123,6 +130,28 @@ def _asignar_cuentas_de_terceros(filas, empresa_rfc, es_egresos, cuentas_default
         fila["cuenta_tercero"] = aplicaciones[0]["cuenta"]
 
 
+def _aplicar_fecha_y_forma_de_pago(filas, periodo_lote, config_empresa, es_egresos, colector):
+    """
+    Fase 3. Cada fila activa sale con:
+      fecha_poliza           fecha del PAGO en un REP; fecha de pago del folio en el IMSS; si no, la de emision
+      tipo_poliza           (solo compras que mueven dinero) Egreso o Diario
+      cuenta_contrapartida  (solo compras que mueven dinero) banco, cuenta del socio o PENDIENTE
+    """
+    rfcs_con_fecha = {str(r).strip().upper() for r in config_empresa.get("rfcs_con_fecha_en_folio", [])}
+    cuenta_banco = config_empresa.get("cuentas_default", {}).get("bancos", "10201000")
+    formas_config = config_empresa.get("formas_pago", {})
+
+    for fila in filas:
+        if fila.get("omitir"):
+            continue
+        fila["fecha_poliza"] = decidir_fecha_poliza(fila, rfcs_con_fecha, colector)
+        avisar_si_el_pago_es_de_otro_periodo(fila, periodo_lote, colector)
+        if fila.get("tipo") == "P":
+            avisar_saldo_insoluto(fila, colector)
+        if es_egresos and necesita_contrapartida(fila):
+            decidir_contrapartida(fila, formas_config, cuenta_banco, colector)
+
+
 def _aplicar_reglas_del_registro(filas, periodo_lote, empresa_rfc, tipo_operacion,
                                  config_empresa, colector):
     """Reglas de la Fase 2: reexpediciones (D) y cuenta de tercero / pagos (A)."""
@@ -167,4 +196,6 @@ def aplicar_reglas(filas, config_empresa, colector, empresa_rfc=None, tipo_opera
     if empresa_rfc and tipo_operacion:
         _aplicar_reglas_del_registro(filas, periodo_lote, empresa_rfc, tipo_operacion,
                                      config_empresa, colector)
+        _aplicar_fecha_y_forma_de_pago(filas, periodo_lote, config_empresa,
+                                       tipo_operacion == "egresos", colector)
     return periodo_lote

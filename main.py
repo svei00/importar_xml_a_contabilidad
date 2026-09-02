@@ -11,6 +11,12 @@ from ml_model import train, predict
 from export import exportar
 from diot import generar_diot, exportar_txt_sat
 from config import load_settings, save_settings, cargar_catalogo, validar_cuenta_vs_sat
+from config_empresa import obtener_config_empresa
+from excepciones import ColectorDeExcepciones
+from reglas_contables import aplicar_reglas
+from periodo_lote import separar_anio_mes
+from resumen_corrida import (desglose_corrida, hay_algo_que_contabilizar,
+                             redactar_aviso_mes_vacio, redactar_aviso_sin_xml)
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -25,45 +31,25 @@ class PrintLogger:
     def flush(self):
         pass
 
-def process_folder(folder_path, tipo_operacion):
-    print(f"\n📁 Cargando XMLs ({tipo_operacion}) desde: {folder_path}")
-    rows = load_folder(folder_path)
-    
-    if not rows:
-        print("⚠️ ERROR: No se encontraron archivos XML válidos o ZIPs.")
-        return
+def avisar_corrida_sin_polizas(empresa_rfc, periodo, tipo_operacion, desglose, colector):
+    """Regla I: no hay nada que contabilizar -> se AVISA y NO se genera ningun archivo."""
+    titulo, mensaje = redactar_aviso_mes_vacio(empresa_rfc, periodo, tipo_operacion, desglose)
+    print(f"ℹ️ {titulo}")
+    print(f"   {mensaje}")
+    colector.imprimir_en_log()
+    messagebox.showinfo(titulo, mensaje)
 
-    if tipo_operacion == "ingresos":
-        empresa_rfc = rows[0]["rfc_emisor"] 
-    else:
-        empresa_rfc = rows[0]["rfc_receptor"] 
-        
-    fecha_primer_xml = rows[0]["fecha"] 
-    anio = fecha_primer_xml.split("-")[0]
-    mes = fecha_primer_xml.split("-")[1]
 
-    print(f"🏢 Empresa: {empresa_rfc} | Periodo: {mes}/{anio}")
-    init_db(empresa_rfc)
-
-    df_catalogo = cargar_catalogo()
-    settings = load_settings()
-    cuentas_def = settings.get("cuentas_default", {})
-
-    output_dir = settings.get("output_path", "")
-    if not output_dir or not os.path.exists(output_dir):
-        output_dir = APP_DIR
-
+def clasificar_y_validar_filas(rows, tipo_operacion, empresa_rfc, df_catalogo, cuentas_def, log_data):
+    """
+    Por cada CFDI: valida su estatus en el SAT, le asigna la cuenta principal
+    (ML o cuenta fija) y lo guarda en la tabla facturas. Devuelve la lista enriquecida.
+    """
     enriched = []
-    log_data = {"total": len(rows), "validas": 0, "nominas": 0, "pagos": 0, "cancelados": 0}
-
-    print("🔍 Validando en el SAT y clasificando conceptos...")
     for r in rows:
-        # Lógica correcta para Nóminas
         if r["tipo"] == "N":
             log_data["nominas"] += 1
-            print(f"   ℹ️ Nómina detectada ({r['uuid'][:8]}): Se incluye en Pólizas, omitida en DIOT.")
-            # Default account for payroll
-            r["cuenta"] = "60010000" 
+            r["cuenta"] = "60010000"   # cuenta de nomina por defecto
         elif r["tipo"] == "P":
             log_data["pagos"] += 1
 
@@ -72,7 +58,7 @@ def process_folder(folder_path, tipo_operacion):
 
         if estado == "CANCELADO":
             log_data["cancelados"] += 1
-            print(f"   🚨 ALERTA: CFDI Cancelado -> {r['uuid']}")
+            print(f"   🚨 ALERTA: CFDI Cancelado -> {r['uuid']} (se excluye de pólizas y DIOT)")
 
         if r["tipo"] == "N":
             pass  # la nómina ya tiene su cuenta (60010000) asignada arriba
@@ -100,9 +86,62 @@ def process_folder(folder_path, tipo_operacion):
             r["cp"], r["estado_sat"]
         ))
         enriched.append(r)
-        log_data["validas"] += 1
+    return enriched
 
-    df = pd.DataFrame(enriched)
+
+def process_folder(folder_path, tipo_operacion):
+    print(f"\n📁 Cargando XMLs ({tipo_operacion}) desde: {folder_path}")
+    rows = load_folder(folder_path)
+
+    if not rows:
+        titulo, mensaje = redactar_aviso_sin_xml(folder_path)
+        print(f"⚠️ {titulo}: no se encontraron archivos XML válidos o ZIPs.")
+        messagebox.showwarning(titulo, mensaje)
+        return
+
+    if tipo_operacion == "ingresos":
+        empresa_rfc = rows[0]["rfc_emisor"]
+    else:
+        empresa_rfc = rows[0]["rfc_receptor"]
+
+    init_db(empresa_rfc)
+
+    df_catalogo = cargar_catalogo()
+    settings = load_settings()
+    cuentas_def = settings.get("cuentas_default", {})
+    config_empresa = obtener_config_empresa(empresa_rfc)
+
+    output_dir = settings.get("output_path", "")
+    if not output_dir or not os.path.exists(output_dir):
+        output_dir = APP_DIR
+
+    log_data = {"total": len(rows), "validas": 0, "nominas": 0, "pagos": 0, "cancelados": 0}
+    colector = ColectorDeExcepciones()
+
+    print("🔍 Validando en el SAT y clasificando conceptos...")
+    enriched = clasificar_y_validar_filas(rows, tipo_operacion, empresa_rfc,
+                                          df_catalogo, cuentas_def, log_data)
+
+    # Reglas de decisión (Fase 1): cancelados, nómina en modo CONTPAQi, periodo del lote.
+    periodo = aplicar_reglas(enriched, config_empresa, colector)
+    desglose = desglose_corrida(enriched)
+    log_data["validas"] = desglose["contabilizables"]
+    log_data["omitidos"] = desglose["total_xml"] - desglose["contabilizables"]
+
+    if not periodo:
+        print("❌ Ningún XML trae una fecha válida; no se puede determinar el periodo.")
+        return
+    anio, mes = separar_anio_mes(periodo)
+    print(f"🏢 Empresa: {empresa_rfc} | Periodo: {mes}/{anio}")
+
+    # Regla I: nada que contabilizar -> aviso y NINGÚN archivo (ni TXT, ni Excel, ni DIOT).
+    if not hay_algo_que_contabilizar(desglose):
+        avisar_corrida_sin_polizas(empresa_rfc, periodo, tipo_operacion, desglose, colector)
+        return
+
+    # A partir de aquí solo viajan los CFDI que SÍ generan póliza (sin cancelados ni nómina omitida).
+    activos = [r for r in enriched if not r["omitir"]]
+    df = pd.DataFrame(activos)
 
     try:
         train_data = get_training_data(empresa_rfc)
@@ -122,14 +161,19 @@ def process_folder(folder_path, tipo_operacion):
         exportar_txt_sat(diot_df, mes, anio, tipo_decl, output_dir)
     else:
         print("📊 Exportando Excel de Ingresos (Sin DIOT)...")
-    
-    exportar(df, diot_df, output_dir, excel_filename, log_data)
+
+    exportar(df, diot_df, output_dir, excel_filename, log_data, colector)
+
+    if colector.cuantas() > 0:
+        print(f"📋 {colector.cuantas()} excepción(es) registradas (hoja EXCEPCIONES del Excel):")
+        colector.imprimir_en_log()
     print(f"✅ ¡PROCESO COMPLETO! Excel guardado en: {output_dir}")
 
     # Aviso de fin + el usuario decide si abre la carpeta (antes se abría sola).
     abrir = messagebox.askyesno(
         "Proceso completo",
         f"Se generaron las pólizas y archivos en:\n{output_dir}\n\n"
+        f"Excepciones registradas: {colector.cuantas()}\n"
         f"Revisa el Log para ver descuadres o cuentas pendientes.\n\n"
         f"¿Abrir la carpeta ahora?")
     if abrir:

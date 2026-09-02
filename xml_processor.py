@@ -1,6 +1,43 @@
 import os
+import json
 import zipfile
 import xml.etree.ElementTree as ET
+
+
+def _nombre_local(etiqueta):
+    """'{http://...}Pago' -> 'Pago' (quita el namespace de la etiqueta XML)."""
+    return etiqueta.split('}')[-1]
+
+
+def extraer_pagos(raiz):
+    """
+    Lee los nodos <Pago> de un REP y devuelve una lista de diccionarios, uno por
+    pago, cada uno con los documentos que liquida. Fases 2 y 3 los usan para:
+      - saber que factura (IdDocumento) cancela cada pago  (caso A)
+      - usar la FechaPago como fecha de poliza             (caso C)
+      - decidir la contrapartida segun FormaDePagoP        (caso B)
+    """
+    pagos = []
+    for nodo in raiz.iter():
+        if _nombre_local(nodo.tag) != 'Pago':
+            continue
+        documentos = []
+        for hijo in nodo.iter():
+            if _nombre_local(hijo.tag) == 'DoctoRelacionado':
+                documentos.append({
+                    "id_documento": hijo.attrib.get("IdDocumento", ""),
+                    "serie": hijo.attrib.get("Serie", ""),
+                    "folio": hijo.attrib.get("Folio", ""),
+                    "imp_pagado": float(hijo.attrib.get("ImpPagado", 0) or 0),
+                    "imp_saldo_insoluto": float(hijo.attrib.get("ImpSaldoInsoluto", 0) or 0),
+                })
+        pagos.append({
+            "fecha_pago": nodo.attrib.get("FechaPago", ""),
+            "forma_pago": nodo.attrib.get("FormaDePagoP", ""),
+            "monto": float(nodo.attrib.get("Monto", 0) or 0),
+            "documentos": documentos,
+        })
+    return pagos
 
 def parse_xml(source):
     tree = ET.parse(source)
@@ -25,9 +62,11 @@ def parse_xml(source):
     rfc_receptor = re.attrib.get("Rfc", "") if re is not None else ""
     
     uuid = None
+    fecha_timbrado = ""
     for elem in root.iter():
         if elem.tag.endswith('TimbreFiscalDigital'):
             uuid = elem.attrib.get("UUID")
+            fecha_timbrado = elem.attrib.get("FechaTimbrado", "")
             break
 
     concepto = ""
@@ -96,7 +135,13 @@ def parse_xml(source):
         "nombre_receptor": re.attrib.get("Nombre", "") if re is not None else "",
         "concepto": concepto, "subtotal": subtotal, "total": total, "cp": cp,
         "iva_16": iva_16, "iva_8": iva_8, "iva_exento": iva_exento, "ieps": ieps,
-        "ret_iva": ret_iva, "ret_isr": ret_isr, "referencia": referencia_xml
+        "ret_iva": ret_iva, "ret_isr": ret_isr, "referencia": referencia_xml,
+        # --- Datos nuevos (Fase 1) para las reglas contables de las fases 2 a 5 ---
+        "serie": serie, "folio": folio,
+        "forma_pago": root.attrib.get("FormaPago", ""),
+        "fecha_timbrado": fecha_timbrado,
+        # Se guarda como texto JSON para que el Excel (hoja BASE) no truene con listas.
+        "pagos_json": json.dumps(extraer_pagos(root)) if tipo == "P" else "",
     }
 
 def load_folder(folder):

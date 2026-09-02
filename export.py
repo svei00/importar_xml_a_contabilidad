@@ -3,6 +3,8 @@ import os
 import re
 from config import load_settings, cargar_catalogo
 from terceros import construir_referencia, titulo
+from texto_contpaqi import a_ascii
+from config_empresa import obtener_config_empresa
 
 def generar_polizas(df, is_egresos, aliases=None, cuentas_clientes=None):
     """
@@ -202,7 +204,17 @@ def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
     """Generador TXT Estricto para CONTPAQi (Formato Tabular de Ancho Fijo)"""
     txt_filename = "Polizas_CONTPAQi_" + excel_filename.replace(".xlsx", ".txt")
     filepath = os.path.join(output_dir, txt_filename)
-    
+
+    # Regla H: los conceptos del TXT van en ASCII puro (sin acentos ni enie) para que
+    # CONTPAQi nunca los corrompa. La empresa sale del nombre del archivo
+    # (Polizas_<TIPO>_<RFC>_<AAAA>_<MM>.xlsx); si se apaga en su config, se respeta.
+    partes_nombre = os.path.basename(excel_filename).split("_")
+    rfc_empresa = partes_nombre[2] if len(partes_nombre) >= 3 else ""
+    usar_ascii = bool(obtener_config_empresa(rfc_empresa).get("conceptos_ascii", True))
+
+    def limpiar_concepto(texto):
+        return a_ascii(texto) if usar_ascii else texto
+
     with open(filepath, "w", encoding="windows-1252", errors="replace") as f:
         for num, group in polizas_df.groupby("Numero"):
             primera_fila = group.iloc[0]
@@ -215,7 +227,7 @@ def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
             if "INGRESO" in tipo_str: tipo_int = "1"
             elif "EGRESO" in tipo_str: tipo_int = "2"
             
-            concepto_poliza = str(primera_fila["Concepto"])[:100].strip()
+            concepto_poliza = limpiar_concepto(str(primera_fila["Concepto"]))[:100].strip()
             if not concepto_poliza: concepto_poliza = "Sin Concepto"
             
             # FIX: Cabecera P sin GUID interno falso. Termina exactamente en 11 0 0
@@ -235,7 +247,7 @@ def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
                 haber = float(r["Haber"])
                 if debe == 0 and haber == 0: continue 
                 
-                concepto_mov = str(r["Concepto"])[:100].strip()
+                concepto_mov = limpiar_concepto(str(r["Concepto"]))[:100].strip()
                 uuid_mov = str(r["UUID"]).strip().upper()
                 
                 tipo_mov = "0" if debe > 0 else "1"
@@ -430,7 +442,7 @@ def ordenar_por_fecha(df):
     return df
 
 
-def exportar(df, diot_df, output_dir, filename, log_data):
+def exportar(df, diot_df, output_dir, filename, log_data, excepciones=None):
     filepath = os.path.join(output_dir, filename)
     is_egresos = "EGRESOS" in filename.upper()
     df = ordenar_por_fecha(df)
@@ -478,6 +490,12 @@ def exportar(df, diot_df, output_dir, filename, log_data):
         if diot_df is not None and not diot_df.empty:
             diot_df.to_excel(w, sheet_name="DIOT_LISTA", index=False)
             auto_ajustar_columnas(w, "DIOT_LISTA", diot_df)
+
+        # Todo lo que la app no pudo decidir sola o dejo fuera a proposito (nada en silencio).
+        if excepciones is not None and excepciones.cuantas() > 0:
+            excepciones_df = pd.DataFrame(excepciones.como_filas())
+            excepciones_df.to_excel(w, sheet_name="EXCEPCIONES", index=False)
+            auto_ajustar_columnas(w, "EXCEPCIONES", excepciones_df)
             
     # Solo se genera el TXT de pólizas aquí. La DIOT se produce UNA sola vez
     # desde diot.py (main.py -> exportar_txt_sat) para no duplicar archivos

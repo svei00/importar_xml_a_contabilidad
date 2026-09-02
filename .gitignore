@@ -12,3 +12,11 @@ settings.json
 salida.xlsx
 *.txt
 *.db
+
+# Datos fiscales y bancarios reales: NUNCA al repo
+stuff/
+*.pdf
+*.xml
+*.zip
+*.csv
+Polizas_*.xlsx

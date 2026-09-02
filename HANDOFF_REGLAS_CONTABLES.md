@@ -547,9 +547,14 @@ estado de cuenta. Si no cuadra, no se importa (evita movimientos perdidos por un
 | 8 — Conciliación | Emparejar pólizas con contrapartida banco ↔ movimientos (monto exacto, ventana de fechas, RFC/nombre en la descripción). Soporta N pólizas : 1 movimiento (caso G) y 1 : N. Hoja CONCILIACION y lo no conciliado de ambos lados | Opus 5.5 |
 | 9 — Pólizas sin CFDI | Reglas + ML (descripción del movimiento → cuenta, mismo patrón que `ml_model.py` pero con modelo aparte) para proponer pólizas de los movimientos no conciliados. Siempre pasan por la ventana de excepciones antes del TXT | Opus 5.5 diseña, Sonnet 5.5 implementa |
 
-**Lo que Svei debe tener listo para la Fase 7:** un estado de cuenta BBVA real (agosto 2026)
-en el formato que pueda conseguir (idealmente el CSV/Excel de la banca en línea, y también
-el PDF).
+**Estados de cuenta reales disponibles (agosto 2026)** en `stuff/` (carpeta ignorada por git,
+NUNCA se sube): BBVA pesos (7 páginas), BBVA dólares (6 páginas) y Banamex (7 páginas).
+Verificado el 2026-10-08: **los tres PDF tienen texto seleccionable** (no requieren OCR).
+Implicaciones para el diseño de la Fase 7:
+- Un parser por banco (BBVA y Banamex tienen layouts distintos); BBVA puede además venir en
+  CSV desde la banca en línea.
+- La cuenta en **dólares** obliga a que `movimientos_bancarios` guarde `moneda` y que la
+  conciliación/pólizas manejen tipo de cambio (y, en la Fase 9, la revaluación mensual).
 
 ---
 

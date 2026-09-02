@@ -338,15 +338,15 @@ Mezclar "visto" con "contabilizado" rompería la idempotencia y la detección de
 `documentos_contabilizados` registra el RESULTADO contable; `facturas` sigue igual.
 
 **Cómo entra la historia que ya existe (julio y antes):**
-1. `sembrar_historial.py` + botón "📚 Sembrar historial…": Svei elige una carpeta de XML de
-   un mes ya contabilizado y, opcionalmente, el Excel corregido de ese mes. Se crea un lote
-   `historico` con sus documentos. Cuentas: del Excel corregido si se da (la cuenta 201/105
-   de cada UUID = `cuenta_tercero`; la de gasto = `cuenta_principal`); si no, el mapa de
-   alias del tercero o los defaults.
-2. `learn_from_excel_ui` (main.py:146) además actualiza `cuenta_tercero` /
-   `cuenta_principal` de esos UUID en el registro (así una corrección manual, p. ej. CFE →
-   20101002, queda en la memoria de la app).
-3. Respaldo determinista: `alias_terceros.cuenta` se habilita también para PROVEEDORES
+1. `sembrar_historial.py` + botón "📚 Sembrar historial…" (HECHO en Fase 2): Svei elige una
+   carpeta de XML de un mes ya contabilizado. Se crea un lote `historico` con SOLO qué
+   comprobantes ya se contabilizaron (UUID, llave, fecha, total); **sin cuentas**.
+   *Decisión tomada con datos reales:* el TXT de pólizas de julio NO coincide con los libros
+   (mandó CFE a 20101999 y Telmex a 60040001, pero la balanza de julio muestra 201-01-002 y
+   603-50-000: Svei corrigió a mano en CONTPAQi). Sembrar cuentas desde un TXT viejo
+   metería datos falsos, así que la cuenta de tercero sale del alias.
+2. (DESCARTADO) Que `learn_from_excel_ui` actualice el registro: innecesario con el alias.
+3. Respaldo determinista (HECHO): `alias_terceros.cuenta` se habilita también para PROVEEDORES
    (hoy solo clientes) y se agrega la columna `cuenta_gasto`. Svei captura en la ventana de
    Clientes/Proveedores: CFE370814QI0 → cuenta 20101002; TME840315KT6 → cuenta_gasto 60350000.
 
@@ -360,13 +360,15 @@ Cada regla: **Disparador → Acción → Excepción → Prueba (agosto 2026)**.
 - **Disparador:** REP (tipo P) recibido o emitido.
 - **Acción:** por cada `DoctoRelacionado` del pago, `cuenta_de_tercero.buscar(IdDocumento)`
   en este orden:
-  1. Registro: `documentos_contabilizados.cuenta_tercero` del `uuid = IdDocumento` en un
-     lote vigente.
-  2. Mapa del tercero: `alias_terceros.cuenta` del RFC.
-  3. Default (`proveedores` / `clientes`).
+  1. La factura se registró en ESTA misma corrida (ya tiene cuenta).
+  2. Registro: `documentos_contabilizados.cuenta_tercero` del `uuid = IdDocumento` en un
+     lote vigente o histórico (si es NULL —documento sembrado— se pasa al siguiente).
+  3. Mapa del tercero: `alias_terceros.cuenta` del RFC.
+  4. Default (`proveedores` / `clientes`).
   El cargo (recibidas) o abono (emitidas) al tercero se divide por documento según
   `ImpPagado`, cada parte contra su cuenta. Se guarda en `pagos_aplicados`.
-- **Excepción:** si se llegó al paso 3 → `PAGO_DE_DOCUMENTO_NO_REGISTRADO` (informativa):
+- **Excepción:** si se llegó al paso 4 Y el documento no está en el registro →
+  `PAGO_DE_DOCUMENTO_NO_REGISTRADO` (informativa; un documento sembrado sin cuenta NO avisa):
   "El REP {uuid} paga {IdDocumento} que no está en el registro: se usó {cuenta}".
 - **Factura PPD nueva:** su `cuenta_tercero` = paso 2 o 3 (para que su futuro REP la encuentre).
 - **Prueba:** REP CFE 4295eff7 → cargo **201-01-002 3,907.00** (vía registro sembrado de julio
@@ -398,7 +400,10 @@ Cada regla: **Disparador → Acción → Excepción → Prueba (agosto 2026)**.
 - **Pago de periodo anterior:** si `fecha_poliza` cae en un mes anterior al `periodo` del
   lote → `PAGO_DE_PERIODO_ANTERIOR` (informativa: ese IVA y esa DIOT son del otro mes).
 - **Saldo insoluto:** si `DoctoRelacionado@ImpSaldoInsoluto > 0` → `SALDO_INSOLUTO`
-  (informativa). Ej.: CFE deja 0.58 en 201-01-002.
+  (informativa). Nota (verificada en el XML real): el REP de CFE trae ImpSaldoAnt 3,907.00
+  e ImpSaldoInsoluto 0.00; los 0.58 de diferencia con la factura (3,907.58) NO los reporta
+  el REP, así que esta excepción no se dispara con el caso de agosto. El saldo 0.87 que
+  queda en 201-01-002 (0.58 + 0.29 de arrastre) es una diferencia de CFE, no de la app.
 - `ordenar_por_fecha` ordena por `fecha_poliza`.
 - **Prueba:** REP Telmex → **03/08**; IMSS e7e5db0a → **06/08** con línea SIPARE 349460.
 
@@ -465,9 +470,22 @@ Cada regla: **Disparador → Acción → Excepción → Prueba (agosto 2026)**.
   - 0 < saldo < importe → `PASIVO_SALDO_PARCIAL` (bloqueante; Svei decide).
   - Sin balanza configurada → según `sin_balanza`: `"gasto_directo"` (default EEA) carga a
     gasto con excepción informativa.
-- **Layout de la balanza:** NO EXISTE AÚN EN ESTE DOCUMENTO. Primer paso de la Fase 5:
-  pedir a Svei una balanza exportada de CONTPAQi (el formato que use: TXT o Excel),
-  documentar sus columnas aquí, y solo entonces escribir `balanza_contpaqi.py`.
+- **Layout de la balanza (VERIFICADO el 2026-10-08 con `stuff/Balanza de Comprobacion
+  07-2026.xlsx` y `08-2026.xlsx`):** Excel exportado de CONTPAQi, UNA hoja, 8 columnas
+  (índice base 0), encabezados en las filas 0 a 6 y datos desde la fila 7:
+  `0` cuenta con guiones (`211-01-000`; para compararla con el catálogo se quitan los
+  guiones → `21101000`), `1` nombre, `2` saldo inicial deudor, `3` saldo inicial acreedor,
+  `4` cargos, `5` abonos, `6` saldo actual deudor, `7` saldo actual acreedor. Las celdas sin
+  saldo vienen vacías (NaN). Al final hay dos filas de totales (`Sumas Iguales:`, sin
+  cuenta) que se ignoran. El título dice `Balanza de comprobación al 31/Jul/2026`.
+  Al leer con pandas aparece un warning de openpyxl (`no default style`): es inofensivo.
+  **Saldo de una cuenta de pasivo** = `acreedor actual − deudor actual` de la balanza
+  del cierre del mes anterior (julio para correr agosto).
+  **Dato real que valida la regla:** en la balanza de julio `211-01-000` cerró en 0 → el
+  IMSS de agosto (2,108.78) va directo a `603-26-000`. En agosto, CONTPAQi Nóminas abonó
+  3,129.15 a `211-01-000` (esa es la provisión de agosto; NO afecta el pago de julio).
+  Como la balanza es del cierre del MES ANTERIOR, un pago a principios de mes no "ve" la
+  provisión del mes en curso: es el comportamiento correcto para pagar cuotas del mes previo.
 - **Prueba:** IMSS e7e5db0a → **Egreso 06/08, cargo 603-26-000 2,108.78 / abono 102-01-001**.
 
 ### Regla G — Un movimiento de banco, varias pólizas (DECISIÓN)
@@ -564,12 +582,15 @@ Implicaciones para el diseño de la Fase 7:
 > todas sus fases las implementa **Sonnet 5.5**. Si una fase encuentra algo que contradice
 > el documento, se detiene y pregunta (no improvisa arquitectura).
 
-**Prerrequisitos de Svei (antes de la Fase 3/4):**
-- Re-exportar `cuentas.txt` desde CONTPAQi (debe traer 20101002 y 20501002).
-- Tener a la mano el Excel corregido de julio 2026 (`Polizas_EGRESOS_EEA251205CR8_2026_07.xlsx`)
-  para sembrar el historial. Si no existe, capturar en la ventana de proveedores:
-  CFE370814QI0 → cuenta 20101002.
-- Fase 5: una balanza de comprobación exportada (julio 2026).
+**Estado y prerrequisitos de Svei:**
+- HECHO: `cuentas.txt` re-exportado (NextCloud, 20/10/2026 16:24; trae 20101002 y 20501002),
+  balanzas de julio y agosto en `stuff/`, estados de cuenta en `stuff/`.
+- Fase 1 HECHA (rama `fase-1-cimientos-mes-vacio`). Fase 2 HECHA (rama
+  `fase-2-registro-contabilizados`).
+- Antes de correr un mes real con la Fase 2: (a) botón "📚 Sembrar historial…" con la
+  carpeta del mes anterior (y los meses que puedan traer reexpediciones), (b) en
+  "Administrar Clientes y Proveedores": CFE370814QI0 → Cuenta tercero 20101002.
+- Para las Fases 4 y 5 capturar además: TME840315KT6 → Cuenta gasto 60350000.
 
 | Fase | Rama | Contenido | Criterio de salida (agosto 2026) |
 |---|---|---|---|

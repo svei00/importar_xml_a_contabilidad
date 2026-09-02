@@ -19,13 +19,16 @@ def desglose_corrida(filas):
     bandera 'omitir' con su 'motivo_omision' ('cancelado', 'nomina', ...).
     """
     desglose = {"total_xml": len(filas), "nomina": 0, "cancelados": 0,
-                "facturas": 0, "notas_credito": 0, "pagos_rep": 0, "contabilizables": 0}
+                "facturas": 0, "notas_credito": 0, "pagos_rep": 0, "contabilizables": 0,
+                "reexpediciones": 0}
     for fila in filas:
         if fila.get("omitir"):
             if fila.get("motivo_omision") == "cancelado":
                 desglose["cancelados"] += 1
             elif fila.get("motivo_omision") == "nomina":
                 desglose["nomina"] += 1
+            elif fila.get("motivo_omision") == "reexpedicion":
+                desglose["reexpediciones"] += 1
             continue
         desglose["contabilizables"] += 1
         tipo = fila.get("tipo")
@@ -64,7 +67,8 @@ def redactar_aviso_mes_vacio(empresa_rfc, periodo, tipo_operacion, desglose):
         f"{desglose['facturas']} {ventas}, "
         f"{desglose['pagos_rep']} {cobros}, "
         f"{desglose['notas_credito']} notas de credito, "
-        f"{desglose['cancelados']} cancelados.\n\n"
+        f"{desglose['cancelados']} cancelados, "
+        f"{desglose['reexpediciones']} reexpediciones.\n\n"
         "No se generó archivo de pólizas"
         + (" ni TXT de DIOT." if tipo_operacion == "egresos" else ".")
     )

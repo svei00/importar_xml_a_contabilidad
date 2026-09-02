@@ -14,6 +14,9 @@ from config import load_settings, save_settings, cargar_catalogo, validar_cuenta
 from config_empresa import obtener_config_empresa
 from excepciones import ColectorDeExcepciones
 from reglas_contables import aplicar_reglas
+from registrar_corrida import registrar_lote
+from sembrar_historial import sembrar_desde_carpeta
+import registro_contable
 from periodo_lote import separar_anio_mes
 from resumen_corrida import (desglose_corrida, hay_algo_que_contabilizar,
                              redactar_aviso_mes_vacio, redactar_aviso_sin_xml)
@@ -89,6 +92,15 @@ def clasificar_y_validar_filas(rows, tipo_operacion, empresa_rfc, df_catalogo, c
     return enriched
 
 
+def anotar_en_el_registro(empresa_rfc, tipo_operacion, periodo, carpeta, filas, estado, archivo_txt=""):
+    """Guarda en la memoria de la app lo que esta corrida decidio. Si falla, AVISA (no es silencioso)."""
+    try:
+        registrar_lote(empresa_rfc, tipo_operacion, periodo, carpeta, filas, estado, archivo_txt)
+        print(f"🗂️ Registro actualizado: lote {periodo} ({estado}).")
+    except Exception as error:
+        print(f"⚠️ No se pudo actualizar el registro de lo contabilizado: {error}")
+
+
 def process_folder(folder_path, tipo_operacion):
     print(f"\n📁 Cargando XMLs ({tipo_operacion}) desde: {folder_path}")
     rows = load_folder(folder_path)
@@ -123,7 +135,8 @@ def process_folder(folder_path, tipo_operacion):
                                           df_catalogo, cuentas_def, log_data)
 
     # Reglas de decisión (Fase 1): cancelados, nómina en modo CONTPAQi, periodo del lote.
-    periodo = aplicar_reglas(enriched, config_empresa, colector)
+    periodo = aplicar_reglas(enriched, config_empresa, colector,
+                             empresa_rfc=empresa_rfc, tipo_operacion=tipo_operacion)
     desglose = desglose_corrida(enriched)
     log_data["validas"] = desglose["contabilizables"]
     log_data["omitidos"] = desglose["total_xml"] - desglose["contabilizables"]
@@ -136,6 +149,8 @@ def process_folder(folder_path, tipo_operacion):
 
     # Regla I: nada que contabilizar -> aviso y NINGÚN archivo (ni TXT, ni Excel, ni DIOT).
     if not hay_algo_que_contabilizar(desglose):
+        anotar_en_el_registro(empresa_rfc, tipo_operacion, periodo, folder_path, enriched,
+                              registro_contable.ESTADO_SIN_MOVIMIENTOS)
         avisar_corrida_sin_polizas(empresa_rfc, periodo, tipo_operacion, desglose, colector)
         return
 
@@ -163,6 +178,9 @@ def process_folder(folder_path, tipo_operacion):
         print("📊 Exportando Excel de Ingresos (Sin DIOT)...")
 
     exportar(df, diot_df, output_dir, excel_filename, log_data, colector)
+    archivo_txt = "Polizas_CONTPAQi_" + excel_filename.replace(".xlsx", ".txt")
+    anotar_en_el_registro(empresa_rfc, tipo_operacion, periodo, folder_path, enriched,
+                          registro_contable.ESTADO_VIGENTE, archivo_txt)
 
     if colector.cuantas() > 0:
         print(f"📋 {colector.cuantas()} excepción(es) registradas (hoja EXCEPCIONES del Excel):")
@@ -267,6 +285,26 @@ def learn_from_excel_ui():
         
     except Exception as e:
         print(f"❌ Error procesando el Excel: {e}")
+
+def sembrar_historial_ui():
+    """Carga un mes YA contabilizado a la memoria de la app (para reexpediciones y pagos)."""
+    folder = filedialog.askdirectory(title="Carpeta de XML de un mes ya contabilizado")
+    if not folder:
+        return
+    son_recibidas = messagebox.askyesno(
+        "Tipo de comprobantes",
+        "¿Son comprobantes RECIBIDOS (compras)?\n\nSí = Recibidas   |   No = Emitidas (ventas)")
+    tipo = "egresos" if son_recibidas else "ingresos"
+    resumen = sembrar_desde_carpeta(folder, tipo)
+    if resumen is None:
+        messagebox.showwarning("Carpeta sin CFDI", f"No se encontraron XML válidos en:\n{folder}")
+        return
+    mensaje = (f"Empresa {resumen['empresa']} | periodo {resumen['periodo']}\n"
+               f"{resumen['sembrados']} comprobantes registrados como ya contabilizados "
+               f"(de {resumen['total_xml']} XML; la nómina no cuenta).")
+    print(f"📚 Historial sembrado: {mensaje}")
+    messagebox.showinfo("Historial sembrado", mensaje)
+
 
 def select_folder_and_run(tipo):
     settings = load_settings()
@@ -403,7 +441,7 @@ def administrar_alias_ui():
     Referencia (RFC-ALIAS) y, SOLO para clientes, la cuenta contable (10501001…).
     La cuenta de cliente es un mapa determinista RFC->cuenta (no usa ML)."""
     from tkinter import ttk
-    from db import (get_aliases_full, set_alias, set_alias_cuenta,
+    from db import (get_aliases_full, set_alias, set_alias_cuenta, set_alias_cuenta_gasto,
                     backfill_tipo_aliases, list_empresas)
     from terceros import limpiar_shortname, construir_referencia
 
@@ -432,15 +470,18 @@ def administrar_alias_ui():
                           state="readonly", width=14)
     filtro.pack(side=tk.LEFT, padx=8); filtro.current(0)
 
-    Label(win, text="Referencia = RFC-ALIAS (sin espacios, máx 30). La Cuenta solo aplica a "
-                    "CLIENTES (10501001…); déjala vacía y caerán en la cuenta varios.",
+    Label(win, text="Referencia = RFC-ALIAS (sin espacios, máx 30). Cuenta tercero: dónde vive el saldo "
+                    "del cliente (10501001…) o proveedor (20101002…); vacía = cuenta 'varios'. "
+                    "Cuenta gasto: solo proveedores (60350000…).",
+          wraplength=900, justify="left",
           bg="#1E1E2E", fg="#A6ADC8", font=("Segoe UI", 9)).pack(anchor="w", padx=12)
 
-    cols = ("rfc", "nombre", "tipo", "alias", "cuenta", "ref")
+    cols = ("rfc", "nombre", "tipo", "alias", "cuenta", "gasto", "ref")
     tree = ttk.Treeview(win, columns=cols, show="headings", height=15)
     for c, txt, w in [("rfc", "RFC", 130), ("nombre", "Nombre oficial", 240),
                       ("tipo", "Tipo", 80), ("alias", "Alias", 110),
-                      ("cuenta", "Cuenta", 90), ("ref", "Referencia", 200)]:
+                      ("cuenta", "Cuenta tercero", 100), ("gasto", "Cuenta gasto", 90),
+                      ("ref", "Referencia", 200)]:
         tree.heading(c, text=txt); tree.column(c, width=w, anchor="w")
     tree.pack(fill="both", expand=True, padx=12, pady=8)
 
@@ -448,9 +489,12 @@ def administrar_alias_ui():
     Label(edit, text="Alias:", bg="#1E1E2E", fg="#CDD6F4").pack(side=tk.LEFT)
     var = tk.StringVar()
     tk.Entry(edit, textvariable=var, width=18, font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=6)
-    Label(edit, text="Cuenta (cliente):", bg="#1E1E2E", fg="#CDD6F4").pack(side=tk.LEFT, padx=(12, 0))
+    Label(edit, text="Cuenta tercero:", bg="#1E1E2E", fg="#CDD6F4").pack(side=tk.LEFT, padx=(12, 0))
     var_cta = tk.StringVar()
     tk.Entry(edit, textvariable=var_cta, width=12, font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=6)
+    Label(edit, text="Cuenta gasto:", bg="#1E1E2E", fg="#CDD6F4").pack(side=tk.LEFT, padx=(6, 0))
+    var_gasto = tk.StringVar()
+    tk.Entry(edit, textvariable=var_gasto, width=12, font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=6)
     prev = Label(edit, text="", bg="#1E1E2E", fg="#A6E3A1", font=("Consolas", 9))
     prev.pack(side=tk.LEFT, padx=10)
 
@@ -458,13 +502,13 @@ def administrar_alias_ui():
         backfill_tipo_aliases(combo.get())
         tree.delete(*tree.get_children())
         f = filtro.get()
-        for rfc, short, nom, tipo, cuenta in get_aliases_full(combo.get()):
+        for rfc, short, nom, tipo, cuenta, cuenta_gasto in get_aliases_full(combo.get()):
             if f == "Clientes" and tipo != "C": continue
             if f == "Proveedores" and tipo != "P": continue
             ref = construir_referencia(rfc, nom or "", {rfc: short} if short else {})
             tree.insert("", "end", iid=rfc,
                         values=(rfc, (nom or "")[:38], TIPO_LABEL.get(tipo, ""),
-                                short or "", cuenta or "", ref))
+                                short or "", cuenta or "", cuenta_gasto or "", ref))
 
     def actualizar_preview(*_):
         sel = tree.selection()
@@ -474,7 +518,7 @@ def administrar_alias_ui():
         sel = tree.selection()
         if sel:
             vals = tree.item(sel[0], "values")
-            var.set(vals[3]); var_cta.set(vals[4]); actualizar_preview()
+            var.set(vals[3]); var_cta.set(vals[4]); var_gasto.set(vals[5]); actualizar_preview()
 
     def guardar():
         sel = tree.selection()
@@ -487,11 +531,14 @@ def administrar_alias_ui():
                                    "El alias no puede quedar vacío. Escribe algo como LUZ, TELMEX, etc.")
             return
         cta = var_cta.get().strip()
-        if cta and not cta.replace("-", "").isdigit():
-            messagebox.showwarning("Cuenta inválida",
-                                   "La cuenta de cliente debe ser numérica (ej. 10501001)."); return
+        gasto = var_gasto.get().strip()
+        for cuenta_escrita in (cta, gasto):
+            if cuenta_escrita and not cuenta_escrita.replace("-", "").isdigit():
+                messagebox.showwarning("Cuenta inválida",
+                                       "Las cuentas deben ser numéricas (ej. 20101002 o 60350000)."); return
         set_alias(combo.get(), rfc, limpio)
-        set_alias_cuenta(combo.get(), rfc, cta)
+        set_alias_cuenta(combo.get(), rfc, cta.replace("-", ""))
+        set_alias_cuenta_gasto(combo.get(), rfc, gasto.replace("-", ""))
         cargar();
         if tree.exists(rfc): tree.selection_set(rfc); tree.see(rfc)
 
@@ -532,6 +579,7 @@ def main():
     crear_boton(left_frame, "👥 Administrar Clientes y Proveedores", "#D69E2E", "#B7791F", administrar_alias_ui).pack(fill="x", pady=5)
 
     Frame(left_frame, bg="#313244", height=1).pack(fill="x", pady=15)
+    crear_boton(left_frame, "📚 Sembrar historial…", "#2C7A7B", "#285E61", sembrar_historial_ui).pack(fill="x", pady=5)
     crear_boton(left_frame, "⚙️ Configuración", "#45475A", "#585B70", abrir_configuracion).pack(fill="x", pady=5)
 
     right_frame = Frame(root, bg="#11111B", padx=10, pady=10)

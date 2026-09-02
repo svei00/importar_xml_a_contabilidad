@@ -111,6 +111,10 @@ def _ensure_alias_table(c):
         c.execute("ALTER TABLE alias_terceros ADD COLUMN tipo TEXT")
     if "cuenta" not in cols:
         c.execute("ALTER TABLE alias_terceros ADD COLUMN cuenta TEXT")
+    #   cuenta_gasto = cuenta de gasto fija de un PROVEEDOR (p.ej. Telmex -> 60350000).
+    #   Mapa determinista que le gana al modelo de IA (se usa desde la Fase 4).
+    if "cuenta_gasto" not in cols:
+        c.execute("ALTER TABLE alias_terceros ADD COLUMN cuenta_gasto TEXT")
 
 def ensure_alias(empresa_rfc, tercero_rfc, nombre_oficial, default_short, tipo=None):
     """Inserta el alias por defecto solo si el RFC del tercero aún no existe.
@@ -138,6 +142,29 @@ def set_alias_cuenta(empresa_rfc, tercero_rfc, cuenta):
     _ensure_alias_table(c)
     c.execute("UPDATE alias_terceros SET cuenta=? WHERE rfc=?", (str(cuenta).strip(), tercero_rfc))
     conn.commit(); conn.close()
+
+def set_alias_cuenta_gasto(empresa_rfc, tercero_rfc, cuenta_gasto):
+    """Asigna la cuenta de GASTO fija de un proveedor (mapa determinista, no ML)."""
+    tercero_rfc = str(tercero_rfc).strip().upper()
+    conn = get_conn(empresa_rfc); c = conn.cursor()
+    _ensure_alias_table(c)
+    c.execute("UPDATE alias_terceros SET cuenta_gasto=? WHERE rfc=?",
+              (str(cuenta_gasto).strip(), tercero_rfc))
+    conn.commit(); conn.close()
+
+def get_cuentas_por_tipo(empresa_rfc, tipo):
+    """
+    {rfc: cuenta} de los terceros de un tipo ('C' cliente / 'P' proveedor) que tienen
+    cuenta asignada. Se usa para la cuenta de tercero donde vive el saldo.
+    """
+    conn = get_conn(empresa_rfc); c = conn.cursor()
+    _ensure_alias_table(c)
+    data = {r[0]: r[1] for r in c.execute(
+        "SELECT rfc, cuenta FROM alias_terceros "
+        "WHERE (tipo=? OR tipo IS NULL OR tipo='') AND cuenta IS NOT NULL AND cuenta != ''",
+        (tipo,)).fetchall()}
+    conn.close()
+    return data
 
 def get_cuentas_clientes(empresa_rfc):
     """{rfc: cuenta} de los terceros con cuenta asignada, para mapear clientes en emitidas."""
@@ -191,10 +218,10 @@ def get_aliases(empresa_rfc):
     return data
 
 def get_aliases_full(empresa_rfc):
-    """Devuelve [(rfc, shortname, nombre_oficial, tipo, cuenta)] ordenado, para la GUI."""
+    """Devuelve [(rfc, shortname, nombre_oficial, tipo, cuenta, cuenta_gasto)] ordenado, para la GUI."""
     conn = get_conn(empresa_rfc); c = conn.cursor()
     _ensure_alias_table(c)
-    c.execute("SELECT rfc, shortname, nombre_oficial, tipo, cuenta FROM alias_terceros "
+    c.execute("SELECT rfc, shortname, nombre_oficial, tipo, cuenta, cuenta_gasto FROM alias_terceros "
               "ORDER BY tipo, nombre_oficial")
     data = c.fetchall()
     conn.close()

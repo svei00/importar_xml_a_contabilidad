@@ -1,10 +1,33 @@
 import pandas as pd
 import os
 import re
+import json
 from config import load_settings, cargar_catalogo
 from terceros import construir_referencia, titulo
 from texto_contpaqi import a_ascii
 from config_empresa import obtener_config_empresa
+
+def _texto_o_vacio(valor):
+    """Un valor de celda como texto; '' si esta vacio (o es el 0 que deja fillna)."""
+    texto = str(valor).strip()
+    return "" if texto in ("", "0", "0.0", "nan", "None") else texto
+
+
+def _leer_aplicaciones_pago(fila, total, cuenta_default):
+    """
+    Lineas [(cuenta, importe)] de un REP, leidas del JSON que dejo reglas_contables.
+    Si la columna no existe (o esta vacia) todo el pago va a la cuenta default,
+    que es el comportamiento de antes.
+    """
+    texto = _texto_o_vacio(fila.get("aplicaciones_pago"))
+    try:
+        lineas = json.loads(texto) if texto else []
+    except ValueError:
+        lineas = []
+    if not lineas:
+        return [(cuenta_default, total)]
+    return [(l["cuenta"], float(l["imp_pagado"])) for l in lineas]
+
 
 def generar_polizas(df, is_egresos, aliases=None, cuentas_clientes=None):
     """
@@ -78,6 +101,13 @@ def generar_polizas(df, is_egresos, aliases=None, cuentas_clientes=None):
         c_cliente_row = (cuentas_clientes.get(rfc_up)
                          or (c_clientes_ext if rfc_up == "XEXX010101000" else c_clientes_default))
 
+        # Caso A: si las reglas ya decidieron donde vive el saldo de este tercero
+        # (alias, registro o default), esa cuenta manda. Si falta, se usa la de siempre.
+        cuenta_tercero_regla = _texto_o_vacio(r.get("cuenta_tercero"))
+        c_prov_row = cuenta_tercero_regla or c_proveedores
+        if cuenta_tercero_regla:
+            c_cliente_row = cuenta_tercero_regla
+
         # Concepto del cargo/abono principal: "NOMBRE - descripción" (legible en el
         # Listado de Pólizas, aunque la descripción del XML sea legalese).
         concepto = (f"{nombre_tercero} - {desc}".strip(" -") if nombre_tercero else desc)[:100]
@@ -108,7 +138,7 @@ def generar_polizas(df, is_egresos, aliases=None, cuentas_clientes=None):
                     if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_pago, ref, iva, 0, "IVA pendiente de pago", uuid])
                     if ret_isr_v > 0: pol.append([num, "Diario", fecha_limpia, c_ret_isr_hon, ref, 0, ret_isr_v, "Retención ISR por pagar", uuid])
                     if ret_iva_v > 0: pol.append([num, "Diario", fecha_limpia, c_ret_iva, ref, 0, ret_iva_v, "Retención IVA por pagar", uuid])
-                    pol.append([num, "Diario", fecha_limpia, c_proveedores, ref, 0, tot, prov, uuid])
+                    pol.append([num, "Diario", fecha_limpia, c_prov_row, ref, 0, tot, prov, uuid])
                 else:
                     neto_pue = round(neto - ieps, 2) if ieps_activo else neto
                     pol.append([num, "Egreso", fecha_limpia, c_principal, ref, neto_pue, 0, concepto, uuid])
@@ -133,7 +163,7 @@ def generar_polizas(df, is_egresos, aliases=None, cuentas_clientes=None):
         elif tipo == "E": 
             if rol == "purchase":
                 prov = nombre_tercero[:50]
-                pol.append([num, "Diario", fecha_limpia, c_proveedores, ref, tot, 0, f"NC Prov - {prov}", uuid])
+                pol.append([num, "Diario", fecha_limpia, c_prov_row, ref, tot, 0, f"NC Prov - {prov}", uuid])
                 pol.append([num, "Diario", fecha_limpia, c_principal, ref, 0, neto, concepto, uuid])
                 if iva > 0: pol.append([num, "Diario", fecha_limpia, c_iva_pdte_pago, ref, 0, iva, "Reversión IVA pendiente", uuid])
             else:
@@ -143,15 +173,19 @@ def generar_polizas(df, is_egresos, aliases=None, cuentas_clientes=None):
                 pol.append([num, "Diario", fecha_limpia, c_cliente_row, ref, 0, tot, f"NC Cli - {cli}", uuid])
 
         elif tipo == "P":
+            # Caso A: cada linea del pago cancela la cuenta donde vive SU factura.
+            lineas_pago = _leer_aplicaciones_pago(r, tot, c_prov_row if rol == "purchase" else c_cliente_row)
             if rol == "purchase":
-                pol.append([num, "Egreso", fecha_limpia, c_proveedores, ref, tot, 0, concepto_pago, uuid])
+                for cuenta_factura, importe in lineas_pago:
+                    pol.append([num, "Egreso", fecha_limpia, cuenta_factura, ref, importe, 0, concepto_pago, uuid])
                 pol.append([num, "Egreso", fecha_limpia, c_banco, ref, 0, tot, "Pago a proveedor", uuid])
                 if iva > 0:
                     pol.append([num, "Egreso", fecha_limpia, c_iva_pagado, ref, iva, 0, "Reclasificación IVA acreditable", uuid])
                     pol.append([num, "Egreso", fecha_limpia, c_iva_pdte_pago, ref, 0, iva, "Cancelación IVA pendiente", uuid])
             else:
                 pol.append([num, "Ingreso", fecha_limpia, c_banco, ref, tot, 0, "Cobro de cliente", uuid])
-                pol.append([num, "Ingreso", fecha_limpia, c_cliente_row, ref, 0, tot, concepto_cobro, uuid])
+                for cuenta_factura, importe in lineas_pago:
+                    pol.append([num, "Ingreso", fecha_limpia, cuenta_factura, ref, 0, importe, concepto_cobro, uuid])
                 if iva > 0:
                     pol.append([num, "Ingreso", fecha_limpia, c_iva_pdte_cobro, ref, iva, 0, "Cancelación IVA pendiente de cobro", uuid])
                     pol.append([num, "Ingreso", fecha_limpia, c_iva_cobrado, ref, 0, iva, "Reclasificación IVA trasladado", uuid])

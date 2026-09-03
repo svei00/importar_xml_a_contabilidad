@@ -28,6 +28,8 @@ Fase 4 agrega (caso E): cada cuenta decidida (principal, de tercero, contraparti
 lineas de pago de un REP) se valida contra el catalogo de CONTPAQi. Una cuenta que no
 existe, es acumulativa, esta retirada o tiene agrupador de nivel 1 se cambia por
 PENDIENTE (la original queda en <campo>_rechazada) y se registra CUENTA_INVALIDA.
+Fase 5 agrega (caso F): un pago de cuota patronal (IMSS, INFONAVIT) se carga al pasivo solo si la
+balanza del cierre del mes anterior muestra saldo por pagar; si no, va directo al gasto.
 Las fases siguientes agregan sus reglas en aplicar_reglas(), una despues de otra.
 
 Sin Tkinter ni ventanas: solo datos adentro, datos afuera.
@@ -44,6 +46,7 @@ from fecha_de_poliza import (decidir_fecha_poliza, avisar_si_el_pago_es_de_otro_
                              avisar_saldo_insoluto)
 from formas_de_pago import necesita_contrapartida, decidir_contrapartida
 from catalogo_contpaqi import cuentas_acumulativas, validar_cuenta, advertencia_de_espejo
+from cuotas_patronales import aplicar_regla_de_cuotas
 
 MOTIVO_CANCELADO = "cancelado"
 MOTIVO_NOMINA = "nomina"
@@ -250,13 +253,14 @@ def _aplicar_reglas_del_registro(filas, periodo_lote, empresa_rfc, tipo_operacio
 
 
 def aplicar_reglas(filas, config_empresa, colector, empresa_rfc=None, tipo_operacion=None,
-                   catalogo=None):
+                   catalogo=None, balanza=None):
     """
     Aplica, en orden, las reglas de decision a TODAS las filas (modifica los
     diccionarios en su lugar) y devuelve el periodo del lote ('AAAA-MM').
     Si se da empresa_rfc y tipo_operacion ('ingresos'/'egresos') tambien aplica
     las reglas que consultan el registro de lo ya contabilizado (Fase 2).
     `catalogo` es el diccionario de catalogo_contpaqi.leer_catalogo (None = no validar).
+    `balanza` es el resultado de balanza_contpaqi.leer_balanza (None = sin balanza).
     """
     periodo_lote = determinar_periodo(filas)
 
@@ -279,5 +283,7 @@ def aplicar_reglas(filas, config_empresa, colector, empresa_rfc=None, tipo_opera
                                      config_empresa, colector)
         _aplicar_fecha_y_forma_de_pago(filas, periodo_lote, config_empresa,
                                        tipo_operacion == "egresos", colector)
+        if tipo_operacion == "egresos":
+            aplicar_regla_de_cuotas(filas, config_empresa, balanza, colector)
         _validar_cuentas_de_las_filas(filas, catalogo, config_empresa, colector)
     return periodo_lote

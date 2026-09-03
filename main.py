@@ -15,6 +15,9 @@ from config import load_settings, save_settings, cargar_catalogo, validar_cuenta
 from config_empresa import obtener_config_empresa
 from excepciones import ColectorDeExcepciones
 from reglas_contables import aplicar_reglas
+from balanza_contpaqi import leer_balanza, es_cierre_del_mes_anterior, fecha_de_cierre_del_mes_anterior
+from cuotas_patronales import cuentas_por_rfc, es_pago_de_cuota
+from periodo_lote import determinar_periodo
 from catalogo_contpaqi import leer_catalogo_si_es_valido, validar_cuenta, cuentas_acumulativas
 from registrar_corrida import registrar_lote
 from sembrar_historial import sembrar_desde_carpeta
@@ -100,6 +103,56 @@ def clasificar_y_validar_filas(rows, tipo_operacion, empresa_rfc, df_catalogo, c
     return enriched
 
 
+def _leer_balanza_del_periodo(ruta, periodo):
+    """Lee la balanza y confirma que sea la del cierre del mes anterior. Devuelve (balanza o None, aviso)."""
+    if not ruta or not os.path.exists(ruta):
+        return None, "No hay balanza seleccionada."
+    try:
+        balanza = leer_balanza(ruta)
+    except (ValueError, OSError) as error:
+        return None, f"No se pudo leer la balanza: {error}"
+    if not es_cierre_del_mes_anterior(balanza, periodo):
+        esperada = fecha_de_cierre_del_mes_anterior(periodo).strftime("%d/%m/%Y")
+        corte = balanza["fecha_corte"].strftime("%d/%m/%Y") if balanza["fecha_corte"] else "fecha desconocida"
+        return None, f"La balanza esta cortada al {corte} y se necesita la del {esperada}."
+    return balanza, ""
+
+
+def obtener_balanza_para_cuotas(config_empresa, periodo, filas):
+    """
+    Solo si el lote trae pagos de cuotas patronales: usa la balanza guardada si es la del
+    cierre del mes anterior; si no, PIDE a Svei que seleccione la correcta. Devuelve la
+    balanza o None (la regla de cuotas sabe que hacer sin ella).
+    """
+    rfcs = cuentas_por_rfc(config_empresa)
+    if not any(es_pago_de_cuota(f, rfcs) for f in filas):
+        return None
+    balanza, aviso = _leer_balanza_del_periodo(config_empresa.get("balanza_path", ""), periodo)
+    if balanza is not None:
+        return balanza
+
+    cierre = fecha_de_cierre_del_mes_anterior(periodo).strftime("%d/%m/%Y")
+    print(f"ℹ️ Cuotas patronales en el lote. {aviso}")
+    if not messagebox.askyesno(
+            "Balanza de comprobación",
+            f"Este lote trae pagos de IMSS/INFONAVIT.\n{aviso}\n\n"
+            f"Para saber si hay provisión por pagar necesito la balanza de comprobación "
+            f"al {cierre} (exportada de CONTPAQi).\n\n¿Seleccionarla ahora?"):
+        return None
+    ruta = filedialog.askopenfilename(title=f"Balanza de comprobación al {cierre}",
+                                      filetypes=[("Excel", "*.xlsx"), ("Todos", "*.*")])
+    balanza, aviso = _leer_balanza_del_periodo(ruta, periodo)
+    if balanza is None:
+        print(f"⚠️ {aviso}")
+        messagebox.showwarning("Balanza no válida", aviso)
+        return None
+    settings = load_settings()
+    settings["balanza_path"] = ruta
+    save_settings(settings)
+    print(f"✅ Balanza al {cierre} cargada.")
+    return balanza
+
+
 def anotar_en_el_registro(empresa_rfc, tipo_operacion, periodo, carpeta, filas, estado, archivo_txt=""):
     """Guarda en la memoria de la app lo que esta corrida decidio. Si falla, AVISA (no es silencioso)."""
     try:
@@ -148,9 +201,12 @@ def process_folder(folder_path, tipo_operacion):
         print(f"⚠️ {aviso_catalogo}")
 
     # Reglas de decisión (Fase 1): cancelados, nómina en modo CONTPAQi, periodo del lote.
+    balanza = None
+    if tipo_operacion == "egresos":
+        balanza = obtener_balanza_para_cuotas(config_empresa, determinar_periodo(enriched), enriched)
     periodo = aplicar_reglas(enriched, config_empresa, colector,
                              empresa_rfc=empresa_rfc, tipo_operacion=tipo_operacion,
-                             catalogo=catalogo)
+                             catalogo=catalogo, balanza=balanza)
 
     # Caso E: lo que la IA aprendio hacia una cuenta rechazada se borra para que no la vuelva a proponer.
     cuentas_rechazadas = {f["cuenta_rechazada"] for f in enriched if f.get("cuenta_rechazada")}

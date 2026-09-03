@@ -230,10 +230,11 @@ Ejemplo para EEA251205CR8 (valores reales acordados):
       "99": {"cuenta": "bancos",   "tipo_poliza": "Egreso", "advertir": true}
     },
     "cuotas_patronales": {
-      "rfcs": ["IMS421231I45", "INF7205011ZA"],
-      "cuenta_pasivo": "21101000",
-      "cuenta_gasto": "60326000",
-      "sin_balanza": "gasto_directo"
+      "sin_balanza": "gasto_directo",
+      "rfcs": {
+        "IMS421231I45": {"cuenta_pasivo": "21101000", "cuenta_gasto": "60326000"},
+        "INF7205011ZA": {"cuenta_pasivo": "21103000", "cuenta_gasto": "60327000"}
+      }
     }
   }
 }
@@ -493,7 +494,16 @@ Cada regla: **Disparador → Acción → Excepción → Prueba (agosto 2026)**.
   3,129.15 a `211-01-000` (esa es la provisión de agosto; NO afecta el pago de julio).
   Como la balanza es del cierre del MES ANTERIOR, un pago a principios de mes no "ve" la
   provisión del mes en curso: es el comportamiento correcto para pagar cuotas del mes previo.
+- **Estructura real de la config (Fase 5):** `cuotas_patronales.rfcs` es un diccionario RFC → cuentas,
+  porque IMSS e INFONAVIT tienen cuentas distintas (211-01/603-26 y 211-03/603-27). La balanza se
+  elige al correr: si el lote trae cuotas y la balanza guardada (`balanza_path`) no es la del cierre
+  del mes anterior, la app PREGUNTA y abre el selector de archivos; si la balanza elegida es de otro
+  mes la rechaza con el aviso de que fecha necesita. Sin balanza aplica `sin_balanza`.
+- **Limitacion conocida:** un pago del IMSS que incluye SAR (julio: 2,948.26 = IMSS 2,040.75 + SAR
+  907.51) se trata como una sola cuota contra la cuenta del IMSS; el reparto a 211-02/603-28 se
+  hace a mano en CONTPAQi, igual que antes. El importe del CFDI no desglosa el SAR.
 - **Prueba:** IMSS e7e5db0a → **Egreso 06/08, cargo 603-26-000 2,108.78 / abono 102-01-001**.
+  Con la balanza real de julio: 211-01-000 saldo acreedor 0.00 → gasto directo (PASIVO_SIN_SALDO).
 
 ### Regla G — Un movimiento de banco, varias pólizas (DECISIÓN)
 - **Decisión:** la conciliación contra el estado de cuenta **SÍ vivirá en esta app**, como
@@ -593,7 +603,8 @@ Implicaciones para el diseño de la Fase 7:
 - HECHO: `cuentas.txt` re-exportado (NextCloud, 20/10/2026 16:24; trae 20101002 y 20501002),
   balanzas de julio y agosto en `stuff/`, estados de cuenta en `stuff/`.
 - Fase 1 HECHA (rama `fase-1-cimientos-mes-vacio`). Fase 2 HECHA (rama
-  `fase-2-registro-contabilizados`).   Fase 3 HECHA (rama `fase-3-fecha-y-forma-de-pago`) y Fase 4 HECHA (rama
+  `fase-2-registro-contabilizados`).   Fase 3 HECHA (rama `fase-3-fecha-y-forma-de-pago`) y Fase 5 HECHA (rama `fase-5-saldos-pasivo`; `balanza_contpaqi.py`, `cuotas_patronales.py`; la
+  prueba de ACEPTACION GLOBAL de las 4 polizas exactas de agosto pasa) y Fase 4 HECHA (rama
   `fase-4-validacion-catalogo`; `catalogo_contpaqi.py`; EEA tiene `cuentas_retiradas` =
   [60040001] y `catalogo_espejo_agrupador` = true en settings.json). Detalle de la Fase 3:
   `fecha_de_poliza.py` y `formas_de_pago.py`. Valores por defecto en el codigo: formas 02, 03 y 99

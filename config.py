@@ -2,6 +2,7 @@ import pandas as pd
 import json
 import os
 from tkinter import filedialog, Tk
+from catalogo_contpaqi import leer_catalogo, catalogo_a_tabla, normalizar_cuenta
 
 SETTINGS_FILE = "settings.json"
 
@@ -48,8 +49,10 @@ def cargar_catalogo():
             return pd.DataFrame()
 
     try:
-        # ¡LA SOLUCIÓN AL ERROR DE UTF-8 ESTÁ AQUÍ (encoding='latin1')!
-        df = pd.read_csv(ruta, sep='\t', dtype=str, encoding='latin1') 
+        # El cuentas.txt de CONTPAQi es de ANCHO FIJO (no CSV); catalogo_contpaqi sabe leerlo.
+        catalogo = leer_catalogo(ruta)
+        df = pd.DataFrame(catalogo_a_tabla(catalogo),
+                          columns=['cuenta', 'nombre', 'cuenta_mayor', 'tipo', 'nivel', 'agrupador'])
         print(f"✅ Catálogo cargado: {len(df)} cuentas listas.")
         return df
     except Exception as e:
@@ -57,10 +60,10 @@ def cargar_catalogo():
         return pd.DataFrame()
 
 def validar_cuenta_vs_sat(cuenta_predicha, df_catalogo):
-    if df_catalogo.empty:
+    if df_catalogo is None or df_catalogo.empty:
         return "Sin validar"
         
-    match = df_catalogo[df_catalogo.iloc[:, 0] == str(cuenta_predicha)]
+    match = df_catalogo[df_catalogo.iloc[:, 0] == normalizar_cuenta(cuenta_predicha)]
     
     if not match.empty:
         return "OK (En catálogo)"

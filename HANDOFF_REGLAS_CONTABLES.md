@@ -446,8 +446,15 @@ Cada regla: **Disparador → Acción → Excepción → Prueba (agosto 2026)**.
   2. Es acumulativa (tiene hijas).
   3. Está en `cuentas_retiradas` de la empresa.
   4. Su agrupador no tiene punto (nivel 1, p. ej. `601`).
-  5. Si `catalogo_espejo_agrupador = true`: el agrupador no es `cuenta[0:3] + "." + cuenta[3:5]`.
-     (60040001 tiene `601.50`, su espejo sería `600.40` → inválida. 60350000 `603.50` ✓).
+  5. (CORREGIDO en la Fase 4 con datos reales) El "espejo" del agrupador
+     (`cuenta[0:3] + "." + cuenta[3:5]`) es solo una ADVERTENCIA informativa
+     (`CUENTA_FUERA_DE_ESPEJO`, y solo si `catalogo_espejo_agrupador = true`), NO bloquea.
+     Medido sobre el catalogo real de EEA: 49 de 945 cuentas afectables no lo cumplen y son
+     legitimas (p. ej. `60450000` Telefono -> `604.48`, `40010000` Ingresos por Construccion ->
+     `401.01`); bloquearlas daria falsos positivos. A `60040001` (agrupador `601.50`, espejo
+     `600.40`) la bloquea la lista `cuentas_retiradas`, que es explicita.
+  Medicion del catalogo real: 1,104 cuentas; 159 acumulativas; 945 afectables; 5 afectables con
+  agrupador de nivel 1 (`50010000`, `50020000`, `50030000`, `50040000`, `60030000`).
 - **Orden de asignación de la cuenta de gasto:** `alias_terceros.cuenta_gasto` del RFC
   (determinista) → ML → `gastos_generales`. La cuenta resultante SIEMPRE se valida.
 - **Excepción:** `CUENTA_INVALIDA` (bloqueante) con el motivo (1–5) y una sugerencia
@@ -586,7 +593,9 @@ Implicaciones para el diseño de la Fase 7:
 - HECHO: `cuentas.txt` re-exportado (NextCloud, 20/10/2026 16:24; trae 20101002 y 20501002),
   balanzas de julio y agosto en `stuff/`, estados de cuenta en `stuff/`.
 - Fase 1 HECHA (rama `fase-1-cimientos-mes-vacio`). Fase 2 HECHA (rama
-  `fase-2-registro-contabilizados`). Fase 3 HECHA (rama `fase-3-fecha-y-forma-de-pago`):
+  `fase-2-registro-contabilizados`).   Fase 3 HECHA (rama `fase-3-fecha-y-forma-de-pago`) y Fase 4 HECHA (rama
+  `fase-4-validacion-catalogo`; `catalogo_contpaqi.py`; EEA tiene `cuentas_retiradas` =
+  [60040001] y `catalogo_espejo_agrupador` = true en settings.json). Detalle de la Fase 3:
   `fecha_de_poliza.py` y `formas_de_pago.py`. Valores por defecto en el codigo: formas 02, 03 y 99
   contra banco (la 99 avisa); `rfcs_con_fecha_en_folio` = IMSS. El mapa de EEA (04 y 28 ->
   20501002, Diario) se escribio en `settings.json` -> `empresas.EEA251205CR8.formas_pago`

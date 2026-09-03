@@ -17,6 +17,10 @@ VALORES_POR_DEFECTO = {
     "conceptos_ascii": True,   # regla H: conceptos del TXT en ASCII puro
     # RFC de emisores cuyo folio trae la fecha de pago embebida (IMSS: A-AAAAMM-REG-DDMMAAAA-LINEA).
     "rfcs_con_fecha_en_folio": ["IMS421231I45"],
+    # Caso E: cuentas que la empresa retiro y que NUNCA deben usarse (aunque sigan en el catalogo).
+    "cuentas_retiradas": [],
+    # Si es True, avisa (sin bloquear) cuando el agrupador SAT no espeja el numero de cuenta.
+    "catalogo_espejo_agrupador": False,
 }
 
 

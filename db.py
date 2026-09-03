@@ -152,6 +152,31 @@ def set_alias_cuenta_gasto(empresa_rfc, tercero_rfc, cuenta_gasto):
               (str(cuenta_gasto).strip(), tercero_rfc))
     conn.commit(); conn.close()
 
+def get_cuentas_gasto(empresa_rfc):
+    """{rfc: cuenta_gasto} de los proveedores con cuenta de gasto fija (le gana a la IA)."""
+    conn = get_conn(empresa_rfc); c = conn.cursor()
+    _ensure_alias_table(c)
+    data = {r[0]: r[1] for r in c.execute(
+        "SELECT rfc, cuenta_gasto FROM alias_terceros "
+        "WHERE cuenta_gasto IS NOT NULL AND cuenta_gasto != ''").fetchall()}
+    conn.close()
+    return data
+
+def borrar_etiquetas_de_cuentas(empresa_rfc, cuentas):
+    """
+    Borra las etiquetas (lo que la IA aprendio) cuyo destino es una de las
+    `cuentas` indicadas (p.ej. una cuenta retirada). Devuelve cuantas borro.
+    """
+    cuentas = {str(c).replace("-", "").strip() for c in cuentas if str(c).strip()}
+    if not cuentas:
+        return 0
+    conn = get_conn(empresa_rfc); c = conn.cursor()
+    marcas = ",".join("?" * len(cuentas))
+    c.execute(f"DELETE FROM etiquetas WHERE REPLACE(cuenta,'-','') IN ({marcas})", tuple(cuentas))
+    borradas = c.rowcount
+    conn.commit(); conn.close()
+    return borradas
+
 def get_cuentas_por_tipo(empresa_rfc, tipo):
     """
     {rfc: cuenta} de los terceros de un tipo ('C' cliente / 'P' proveedor) que tienen

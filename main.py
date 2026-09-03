@@ -4,7 +4,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, Frame, Button, Label, Text, Scrollbar
 import pandas as pd
 
-from db import init_db, upsert_factura, upsert_etiqueta, get_training_data, get_tipo_diot_automatico, limpiar_etiquetas
+from db import (init_db, upsert_factura, upsert_etiqueta, get_training_data, get_tipo_diot_automatico,
+                limpiar_etiquetas, get_cuentas_gasto, borrar_etiquetas_de_cuentas)
 from xml_processor import load_folder, es_pago
 from sat_validator import validar
 from ml_model import train, predict
@@ -14,6 +15,7 @@ from config import load_settings, save_settings, cargar_catalogo, validar_cuenta
 from config_empresa import obtener_config_empresa
 from excepciones import ColectorDeExcepciones
 from reglas_contables import aplicar_reglas
+from catalogo_contpaqi import leer_catalogo_si_es_valido, validar_cuenta, cuentas_acumulativas
 from registrar_corrida import registrar_lote
 from sembrar_historial import sembrar_desde_carpeta
 import registro_contable
@@ -43,11 +45,13 @@ def avisar_corrida_sin_polizas(empresa_rfc, periodo, tipo_operacion, desglose, c
     messagebox.showinfo(titulo, mensaje)
 
 
-def clasificar_y_validar_filas(rows, tipo_operacion, empresa_rfc, df_catalogo, cuentas_def, log_data):
+def clasificar_y_validar_filas(rows, tipo_operacion, empresa_rfc, df_catalogo, cuentas_def, log_data,
+                               cuentas_gasto_fijas=None):
     """
     Por cada CFDI: valida su estatus en el SAT, le asigna la cuenta principal
     (ML o cuenta fija) y lo guarda en la tabla facturas. Devuelve la lista enriquecida.
     """
+    cuentas_gasto_fijas = cuentas_gasto_fijas or {}
     enriched = []
     for r in rows:
         if r["tipo"] == "N":
@@ -72,7 +76,11 @@ def clasificar_y_validar_filas(rows, tipo_operacion, empresa_rfc, df_catalogo, c
             # cliente sale de la Referencia (RFC-ALIAS), no de una subcuenta.
             r["cuenta"] = cuentas_def.get("ventas", "40101000")
         else:
-            cuenta = predict(r["concepto"], r["nombre_emisor"], r["cp"], empresa_rfc) or cuentas_def.get("gastos_generales", "60000000")
+            # Orden: 1) cuenta de gasto FIJA del proveedor (alias)  2) la IA  3) la cuenta general.
+            cuenta_fija = cuentas_gasto_fijas.get(str(r["rfc_emisor"]).strip().upper())
+            cuenta = (cuenta_fija
+                      or predict(r["concepto"], r["nombre_emisor"], r["cp"], empresa_rfc)
+                      or cuentas_def.get("gastos_generales", "60000000"))
             r["cuenta"] = cuenta
 
         r["nota"] = validar_cuenta_vs_sat(r["cuenta"], df_catalogo)
@@ -132,11 +140,23 @@ def process_folder(folder_path, tipo_operacion):
 
     print("🔍 Validando en el SAT y clasificando conceptos...")
     enriched = clasificar_y_validar_filas(rows, tipo_operacion, empresa_rfc,
-                                          df_catalogo, cuentas_def, log_data)
+                                          df_catalogo, cuentas_def, log_data,
+                                          get_cuentas_gasto(empresa_rfc))
+
+    catalogo, aviso_catalogo = leer_catalogo_si_es_valido(config_empresa.get("catalogo_path", ""))
+    if catalogo is None:
+        print(f"⚠️ {aviso_catalogo}")
 
     # Reglas de decisión (Fase 1): cancelados, nómina en modo CONTPAQi, periodo del lote.
     periodo = aplicar_reglas(enriched, config_empresa, colector,
-                             empresa_rfc=empresa_rfc, tipo_operacion=tipo_operacion)
+                             empresa_rfc=empresa_rfc, tipo_operacion=tipo_operacion,
+                             catalogo=catalogo)
+
+    # Caso E: lo que la IA aprendio hacia una cuenta rechazada se borra para que no la vuelva a proponer.
+    cuentas_rechazadas = {f["cuenta_rechazada"] for f in enriched if f.get("cuenta_rechazada")}
+    borradas = borrar_etiquetas_de_cuentas(empresa_rfc, cuentas_rechazadas)
+    if borradas:
+        print(f"🧹 La IA olvidó {borradas} etiqueta(s) hacia cuentas inválidas: {', '.join(sorted(cuentas_rechazadas))}")
     desglose = desglose_corrida(enriched)
     log_data["validas"] = desglose["contabilizables"]
     log_data["omitidos"] = desglose["total_xml"] - desglose["contabilizables"]
@@ -239,9 +259,21 @@ def learn_from_excel_ui():
             if len(v) >= 3:
                 prefijos_excluir.add(v[:3])
 
+        config_aprendizaje = obtener_config_empresa(rfc)
+        catalogo_aprendizaje, _ = leer_catalogo_si_es_valido(config_aprendizaje.get("catalogo_path", ""))
+        acumulativas_aprendizaje = cuentas_acumulativas(catalogo_aprendizaje) if catalogo_aprendizaje else set()
+        cuentas_no_aprendidas = set()
+
         def es_aprendible(cuenta):
             c = str(cuenta).strip()
-            return c[:3] not in prefijos_excluir and c.replace("-", "").isdigit()
+            if c[:3] in prefijos_excluir or not c.replace("-", "").isdigit():
+                return False
+            if catalogo_aprendizaje and validar_cuenta(
+                    c, catalogo_aprendizaje, acumulativas_aprendizaje,
+                    config_aprendizaje.get("cuentas_retiradas", [])) is not None:
+                cuentas_no_aprendidas.add(c)   # cuenta inexistente/acumulativa/retirada: NO se aprende
+                return False
+            return True
 
         df_polizas["Cuenta"] = df_polizas["Cuenta"].astype(str)
         df_polizas["Debe"] = pd.to_numeric(df_polizas.get("Debe"), errors="coerce").fillna(0)
@@ -268,6 +300,8 @@ def learn_from_excel_ui():
             train(train_data, rfc)
         print(f"✅ ¡IA actualizada! Aprendió {count} cuentas principales "
               f"(se descartaron {purgadas} etiquetas inválidas).")
+        if cuentas_no_aprendidas:
+            print(f"⚠️ No se aprendieron cuentas inválidas del catálogo: {', '.join(sorted(cuentas_no_aprendidas))}")
         
         # 2. LA MAGIA: REGENERAR EL ARCHIVO TXT CON LAS CORRECCIONES
         print(f"🔄 Regenerando archivo TXT para CONTPAQi con los nuevos cambios...")

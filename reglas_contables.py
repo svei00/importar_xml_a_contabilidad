@@ -24,6 +24,10 @@ Fase 3 agrega:
   fecha_poliza             fecha del pago (REP) o de pago embebida en el folio del IMSS (caso C)
   tipo_poliza              Egreso o Diario segun la forma de pago (caso B)
   cuenta_contrapartida     banco, cuenta del socio (tarjeta) o PENDIENTE (caso B)
+Fase 4 agrega (caso E): cada cuenta decidida (principal, de tercero, contrapartida y las
+lineas de pago de un REP) se valida contra el catalogo de CONTPAQi. Una cuenta que no
+existe, es acumulativa, esta retirada o tiene agrupador de nivel 1 se cambia por
+PENDIENTE (la original queda en <campo>_rechazada) y se registra CUENTA_INVALIDA.
 Las fases siguientes agregan sus reglas en aplicar_reglas(), una despues de otra.
 
 Sin Tkinter ni ventanas: solo datos adentro, datos afuera.
@@ -39,6 +43,7 @@ from cuenta_de_tercero import (cuenta_para_documento_nuevo, resolver_cuenta_de_d
 from fecha_de_poliza import (decidir_fecha_poliza, avisar_si_el_pago_es_de_otro_periodo,
                              avisar_saldo_insoluto)
 from formas_de_pago import necesita_contrapartida, decidir_contrapartida
+from catalogo_contpaqi import cuentas_acumulativas, validar_cuenta, advertencia_de_espejo
 
 MOTIVO_CANCELADO = "cancelado"
 MOTIVO_NOMINA = "nomina"
@@ -152,6 +157,80 @@ def _aplicar_fecha_y_forma_de_pago(filas, periodo_lote, config_empresa, es_egres
             decidir_contrapartida(fila, formas_config, cuenta_banco, colector)
 
 
+CUENTA_PENDIENTE = "PENDIENTE"
+_SIN_CUENTA = ("", "0", "nan", "None", CUENTA_PENDIENTE)
+
+_SUGERENCIA_POR_CAMPO = {
+    "cuenta": "Asigna la cuenta correcta como 'Cuenta gasto' del proveedor en Administrar "
+              "Clientes y Proveedores (o corrige el Excel y usa 'Aprender').",
+    "cuenta_tercero": "Corrige la 'Cuenta tercero' de este proveedor o cliente en Administrar Clientes y Proveedores.",
+    "cuenta_contrapartida": "Corrige la cuenta de esa forma de pago en 'formas_pago' de la empresa (settings.json).",
+}
+
+
+def _rechazar_cuenta(fila, campo, cuenta, motivo, colector):
+    """Cambia la cuenta mala por PENDIENTE, guarda la original y deja la excepcion BLOQUEANTE."""
+    fila[campo + "_rechazada"] = cuenta
+    colector.agregar(
+        exc.CUENTA_INVALIDA, exc.BLOQUEANTE, fila.get("uuid", ""),
+        f"La cuenta {cuenta} ({campo}) {motivo}.", _SUGERENCIA_POR_CAMPO.get(campo, ""))
+    return CUENTA_PENDIENTE
+
+
+def _revisar_una_cuenta(fila, campo, cuenta, reglas, colector):
+    """Devuelve la cuenta que debe quedar: la misma si sirve, PENDIENTE si no."""
+    cuenta = str(cuenta).strip()
+    if cuenta in _SIN_CUENTA:
+        return cuenta
+    catalogo, acumulativas, retiradas, pedir_espejo = reglas
+    rechazo = validar_cuenta(cuenta, catalogo, acumulativas, retiradas)
+    if rechazo is not None:
+        return _rechazar_cuenta(fila, campo, cuenta, rechazo[1], colector)
+    if pedir_espejo:
+        aviso = advertencia_de_espejo(cuenta, catalogo)
+        if aviso:
+            colector.agregar(exc.CUENTA_FUERA_DE_ESPEJO, exc.INFORMATIVA, fila.get("uuid", ""),
+                             f"Cuenta {cuenta}: {aviso}.", "Solo informativo; confirma que sea la cuenta que quieres.")
+    return cuenta
+
+
+def _revisar_lineas_de_pago(fila, reglas, colector):
+    """Las cuentas de cada linea de un REP (caso A) tambien deben ser validas."""
+    lineas = json.loads(fila.get("aplicaciones_pago") or "[]")
+    for linea in lineas:
+        linea["cuenta"] = _revisar_una_cuenta(fila, "cuenta_tercero", linea["cuenta"], reglas, colector)
+    fila["aplicaciones_pago"] = json.dumps(lineas)
+    if lineas:
+        fila["cuenta_tercero"] = lineas[0]["cuenta"]
+
+
+def _validar_cuentas_de_las_filas(filas, catalogo, config_empresa, colector):
+    """Caso E: ninguna cuenta mala llega a una poliza sin que se vea."""
+    if catalogo is None:
+        colector.agregar(
+            exc.CATALOGO_NO_DISPONIBLE, exc.INFORMATIVA, "",
+            "No hay catalogo de cuentas legible: las cuentas NO se validaron.",
+            "Revisa la ruta del catalogo en Configuracion (debe ser el cuentas.txt de CONTPAQi).")
+        return
+    reglas = (catalogo, cuentas_acumulativas(catalogo),
+              config_empresa.get("cuentas_retiradas", []),
+              bool(config_empresa.get("catalogo_espejo_agrupador")))
+
+    for fila in filas:
+        if fila.get("omitir"):
+            continue
+        tipo = fila.get("tipo")
+        if tipo in ("I", "E", "N") and fila.get("cuenta") is not None:
+            fila["cuenta"] = _revisar_una_cuenta(fila, "cuenta", fila["cuenta"], reglas, colector)
+        if tipo == "P" and fila.get("aplicaciones_pago"):
+            _revisar_lineas_de_pago(fila, reglas, colector)
+        elif tipo in ("I", "E") and fila.get("cuenta_tercero"):
+            fila["cuenta_tercero"] = _revisar_una_cuenta(fila, "cuenta_tercero", fila["cuenta_tercero"], reglas, colector)
+        if fila.get("cuenta_contrapartida"):
+            fila["cuenta_contrapartida"] = _revisar_una_cuenta(
+                fila, "cuenta_contrapartida", fila["cuenta_contrapartida"], reglas, colector)
+
+
 def _aplicar_reglas_del_registro(filas, periodo_lote, empresa_rfc, tipo_operacion,
                                  config_empresa, colector):
     """Reglas de la Fase 2: reexpediciones (D) y cuenta de tercero / pagos (A)."""
@@ -170,12 +249,14 @@ def _aplicar_reglas_del_registro(filas, periodo_lote, empresa_rfc, tipo_operacio
         filas, empresa_rfc, es_egresos, config_empresa.get("cuentas_default", {}), colector)
 
 
-def aplicar_reglas(filas, config_empresa, colector, empresa_rfc=None, tipo_operacion=None):
+def aplicar_reglas(filas, config_empresa, colector, empresa_rfc=None, tipo_operacion=None,
+                   catalogo=None):
     """
     Aplica, en orden, las reglas de decision a TODAS las filas (modifica los
     diccionarios en su lugar) y devuelve el periodo del lote ('AAAA-MM').
     Si se da empresa_rfc y tipo_operacion ('ingresos'/'egresos') tambien aplica
     las reglas que consultan el registro de lo ya contabilizado (Fase 2).
+    `catalogo` es el diccionario de catalogo_contpaqi.leer_catalogo (None = no validar).
     """
     periodo_lote = determinar_periodo(filas)
 
@@ -198,4 +279,5 @@ def aplicar_reglas(filas, config_empresa, colector, empresa_rfc=None, tipo_opera
                                      config_empresa, colector)
         _aplicar_fecha_y_forma_de_pago(filas, periodo_lote, config_empresa,
                                        tipo_operacion == "egresos", colector)
+        _validar_cuentas_de_las_filas(filas, catalogo, config_empresa, colector)
     return periodo_lote

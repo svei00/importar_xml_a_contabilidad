@@ -6,6 +6,10 @@ from config import load_settings, cargar_catalogo
 from terceros import construir_referencia, titulo
 from texto_contpaqi import a_ascii
 from config_empresa import obtener_config_empresa
+from polizas_para_txt import (numeros_que_no_entran, agregar_columna_en_txt,
+                              numeros_con_cuenta_sin_asignar, numeros_de_polizas_bloqueadas,
+                              cuenta_sin_asignar)
+from movimientos_banco import construir_movimientos_de_banco
 
 def _texto_o_vacio(valor):
     """Un valor de celda como texto; '' si esta vacio (o es el 0 que deja fillna)."""
@@ -239,8 +243,14 @@ def auto_ajustar_columnas(writer, sheet_name, df):
             if col in ["Cuenta", "Referencia", "Fecha"]:
                 cell.number_format = '@'
 
-def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
-    """Generador TXT Estricto para CONTPAQi (Formato Tabular de Ancho Fijo)"""
+def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename, numeros_excluidos=None):
+    """
+    Generador TXT Estricto para CONTPAQi (Formato Tabular de Ancho Fijo).
+    Una poliza NO se escribe si esta en `numeros_excluidos` (excepcion bloqueante) o si
+    alguna de sus lineas tiene la cuenta sin asignar: asi nunca llega descuadrada a CONTPAQi.
+    """
+    numeros_excluidos = set(numeros_excluidos or ())
+    sin_cuenta = numeros_con_cuenta_sin_asignar(polizas_df)
     txt_filename = "Polizas_CONTPAQi_" + excel_filename.replace(".xlsx", ".txt")
     filepath = os.path.join(output_dir, txt_filename)
 
@@ -256,6 +266,10 @@ def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
 
     with open(filepath, "w", encoding="windows-1252", errors="replace") as f:
         for num, group in polizas_df.groupby("Numero"):
+            if num in numeros_excluidos or num in sin_cuenta:
+                motivo = "excepcion bloqueante" if num in numeros_excluidos else "cuenta sin asignar"
+                print(f"   [FUERA DEL TXT] Poliza {num}: {motivo}.")
+                continue
             primera_fila = group.iloc[0]
             
             fecha_cruda = str(primera_fila["Fecha"]).split()[0].replace("-", "").replace("/", "").strip()
@@ -274,10 +288,6 @@ def exportar_txt_contpaqi(polizas_df, output_dir, excel_filename):
             
             for _, r in group.iterrows():
                 cuenta_val = str(r["Cuenta"]).strip()
-                if cuenta_val.upper() in ["PENDIENTE", "NAN", "0"] or "FALTA" in cuenta_val.upper():
-                    continue 
-                if not cuenta_val.replace("-", "").isdigit():
-                    continue
                 
                 referencia = str(r.get("Referencia", "")).strip()[:30]
                 if referencia.lower() == "nan": referencia = ""
@@ -506,6 +516,11 @@ def exportar(df, diot_df, output_dir, filename, log_data, excepciones=None):
 
     polizas_df = generar_polizas(df, is_egresos, aliases, cuentas_clientes)
 
+    # Fase 6: que polizas se quedan fuera del TXT (excepcion bloqueante o cuenta sin asignar).
+    uuids_bloqueados = excepciones.uuids_bloqueados() if excepciones is not None else set()
+    numeros_fuera = numeros_que_no_entran(polizas_df, uuids_bloqueados)
+    polizas_df = agregar_columna_en_txt(polizas_df, uuids_bloqueados)
+
     # Cuadre Debe=Haber + cuentas sin asignar ANTES de escribir el TXT.
     descuadres, pendientes = validar_balance_polizas(polizas_df)
     if descuadres:
@@ -513,7 +528,7 @@ def exportar(df, diot_df, output_dir, filename, log_data, excepciones=None):
         for num, d, h, dif, con in descuadres:
             print(f"   Póliza {num}: Debe={d} Haber={h} dif={dif}  [{con}]")
     if pendientes:
-        print(f"[AVISO] Cuentas sin asignar (corrige antes de importar): {', '.join(pendientes)}")
+        print(f"[AVISO] Cuentas sin asignar (esas polizas NO van al TXT): {', '.join(pendientes)}")
     if not descuadres and not pendientes:
         print("[OK] Todas las pólizas cuadran (Debe = Haber); sin cuentas pendientes.")
 
@@ -526,6 +541,12 @@ def exportar(df, diot_df, output_dir, filename, log_data, excepciones=None):
 
         polizas_df.to_excel(w, sheet_name="POLIZAS_CONTPAQI", index=False)
         auto_ajustar_columnas(w, "POLIZAS_CONTPAQI", polizas_df)
+
+        # Regla G (parte 1): todo lo que las polizas cargan o abonan a banco, dia por dia.
+        movimientos_df = construir_movimientos_de_banco(polizas_df, numeros_fuera)
+        if not movimientos_df.empty:
+            movimientos_df.to_excel(w, sheet_name="MOVIMIENTOS_BANCO", index=False)
+            auto_ajustar_columnas(w, "MOVIMIENTOS_BANCO", movimientos_df)
 
         # DIOT agregada (una fila por RFC) para revisión humana — solo egresos.
         if diot_df is not None and not diot_df.empty:
@@ -541,7 +562,9 @@ def exportar(df, diot_df, output_dir, filename, log_data, excepciones=None):
     # Solo se genera el TXT de pólizas aquí. La DIOT se produce UNA sola vez
     # desde diot.py (main.py -> exportar_txt_sat) para no duplicar archivos
     # con lógicas distintas. (generar_archivo_diot_sat quedó obsoleta.)
-    exportar_txt_contpaqi(polizas_df, output_dir, filename)
+    exportar_txt_contpaqi(polizas_df, output_dir, filename, numeros_fuera)
+    if numeros_fuera:
+        print(f"⚠️ {len(numeros_fuera)} poliza(s) quedaron FUERA del TXT (ver columna EnTXT y hoja EXCEPCIONES).")
 
     # NO se abre la carpeta aquí: la capa de UI (main.py) decide si avisar y abrir,
     # para que el usuario reciba el mensaje de "proceso terminado" y elija abrir o no.

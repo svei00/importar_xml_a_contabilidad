@@ -81,6 +81,15 @@ class ColectorDeExcepciones:
         uuid = str(uuid or "")
         return [e for e in self._lista if e.uuid == uuid]
 
+    def uuids_bloqueados(self):
+        """UUID de los CFDI que tienen al menos una excepcion bloqueante."""
+        return {e.uuid for e in self.bloqueantes() if e.uuid}
+
+    def por_severidad(self):
+        """{'bloqueante': [...], 'informativa': [...]} para mostrarlas agrupadas en la ventana."""
+        return {BLOQUEANTE: self.bloqueantes(),
+                INFORMATIVA: [e for e in self._lista if e.severidad == INFORMATIVA]}
+
     def cuantas(self):
         return len(self._lista)
 

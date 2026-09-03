@@ -603,7 +603,10 @@ Implicaciones para el diseño de la Fase 7:
 - HECHO: `cuentas.txt` re-exportado (NextCloud, 20/10/2026 16:24; trae 20101002 y 20501002),
   balanzas de julio y agosto en `stuff/`, estados de cuenta en `stuff/`.
 - Fase 1 HECHA (rama `fase-1-cimientos-mes-vacio`). Fase 2 HECHA (rama
-  `fase-2-registro-contabilizados`).   Fase 3 HECHA (rama `fase-3-fecha-y-forma-de-pago`) y Fase 5 HECHA (rama `fase-5-saldos-pasivo`; `balanza_contpaqi.py`, `cuotas_patronales.py`; la
+  `fase-2-registro-contabilizados`).   Fase 3 HECHA (rama `fase-3-fecha-y-forma-de-pago`) y Fase 6 HECHA (directo en main; `ventana_excepciones.py`, `polizas_para_txt.py`,
+  `movimientos_banco.py`): ventana de revision antes de escribir archivos, una poliza con cuenta
+  PENDIENTE o con excepcion bloqueante NO entra al TXT (columna `EnTXT` en el Excel), hoja
+  `MOVIMIENTOS_BANCO` y registro 'bloqueado'. **PARTE 1 COMPLETA.** Fase 5 HECHA (rama `fase-5-saldos-pasivo`; `balanza_contpaqi.py`, `cuotas_patronales.py`; la
   prueba de ACEPTACION GLOBAL de las 4 polizas exactas de agosto pasa) y Fase 4 HECHA (rama
   `fase-4-validacion-catalogo`; `catalogo_contpaqi.py`; EEA tiene `cuentas_retiradas` =
   [60040001] y `catalogo_espejo_agrupador` = true en settings.json). Detalle de la Fase 3:
@@ -662,14 +665,18 @@ repo** (datos fiscales confidenciales).
 
 ## 8. Git
 
-Rama por fase (nombres en la tabla de la sección 6). Probar local contra los XML de agosto
-2026 antes de merge a `main`. Nada se mezcla a `main` sin pasar el criterio de salida de su
-fase.
+**NO SE CREAN RAMAS.** Svei es el unico desarrollador: todo se trabaja directo en `main`
+(verifica con `git branch --show-current`). Este documento llego a proponer "una rama por
+fase" y fue un error que molesto a Svei; ignora cualquier mencion de ramas en otras secciones
+(la columna "Rama" de la tabla de la seccion 6 es solo historica). Los cambios se dejan SIN
+commitear y se entrega el comando de commit para que Svei lo corra el; no se hace commit
+ni push sin que lo pida.
 
-**Mensajes de commit (preferencia firme de Svei):** UNA sola línea, entre comillas
-simples, sin acentos, sin comillas dobles ni caracteres especiales, y SIN la línea
+**Comandos y mensajes de commit (preferencia firme de Svei):** su terminal es Windows
+PowerShell 5.1, que NO acepta `&&`: se encadena con `;`. Mensaje de UNA sola linea, entre
+comillas simples, sin acentos, sin comillas dobles ni caracteres especiales, y SIN la linea
 `Co-Authored-By`. Ejemplo:
-`git add archivo.py && git commit -m 'Fase 1: cimientos, cancelados excluidos y aviso de mes vacio'`
+`git add archivo.py; git commit -m 'Fase 1: cimientos, cancelados excluidos y aviso de mes vacio'`
 
 ---
 

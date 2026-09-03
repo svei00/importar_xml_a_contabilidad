@@ -15,6 +15,7 @@ from config import load_settings, save_settings, cargar_catalogo, validar_cuenta
 from config_empresa import obtener_config_empresa
 from excepciones import ColectorDeExcepciones
 from reglas_contables import aplicar_reglas
+from ventana_excepciones import mostrar_ventana_de_excepciones, construir_texto_de_resumen
 from balanza_contpaqi import leer_balanza, es_cierre_del_mes_anterior, fecha_de_cierre_del_mes_anterior
 from cuotas_patronales import cuentas_por_rfc, es_pago_de_cuota
 from periodo_lote import determinar_periodo
@@ -153,10 +154,12 @@ def obtener_balanza_para_cuotas(config_empresa, periodo, filas):
     return balanza
 
 
-def anotar_en_el_registro(empresa_rfc, tipo_operacion, periodo, carpeta, filas, estado, archivo_txt=""):
+def anotar_en_el_registro(empresa_rfc, tipo_operacion, periodo, carpeta, filas, estado, archivo_txt="",
+                          uuids_bloqueados=()):
     """Guarda en la memoria de la app lo que esta corrida decidio. Si falla, AVISA (no es silencioso)."""
     try:
-        registrar_lote(empresa_rfc, tipo_operacion, periodo, carpeta, filas, estado, archivo_txt)
+        registrar_lote(empresa_rfc, tipo_operacion, periodo, carpeta, filas, estado, archivo_txt,
+                       uuids_bloqueados)
         print(f"🗂️ Registro actualizado: lote {periodo} ({estado}).")
     except Exception as error:
         print(f"⚠️ No se pudo actualizar el registro de lo contabilizado: {error}")
@@ -234,6 +237,15 @@ def process_folder(folder_path, tipo_operacion):
     activos = [r for r in enriched if not r["omitir"]]
     df = pd.DataFrame(activos)
 
+    # Fase 6: antes de escribir NADA, Svei revisa lo que la app no pudo decidir sola.
+    if colector.cuantas() > 0:
+        uuids_de_polizas = {str(r["uuid"]).strip().upper() for r in activos}
+        bloqueadas = {u.strip().upper() for u in colector.uuids_bloqueados()} & uuids_de_polizas
+        resumen = construir_texto_de_resumen(len(uuids_de_polizas), len(bloqueadas))
+        if not mostrar_ventana_de_excepciones(f"Revisión {mes}/{anio} - {empresa_rfc}", resumen, colector):
+            print("🛑 Corrida cancelada en la revisión de excepciones: no se generó ningún archivo.")
+            return
+
     try:
         train_data = get_training_data(empresa_rfc)
         if train_data is not None and len(train_data) > 1:
@@ -256,7 +268,7 @@ def process_folder(folder_path, tipo_operacion):
     exportar(df, diot_df, output_dir, excel_filename, log_data, colector)
     archivo_txt = "Polizas_CONTPAQi_" + excel_filename.replace(".xlsx", ".txt")
     anotar_en_el_registro(empresa_rfc, tipo_operacion, periodo, folder_path, enriched,
-                          registro_contable.ESTADO_VIGENTE, archivo_txt)
+                          registro_contable.ESTADO_VIGENTE, archivo_txt, colector.uuids_bloqueados())
 
     if colector.cuantas() > 0:
         print(f"📋 {colector.cuantas()} excepción(es) registradas (hoja EXCEPCIONES del Excel):")

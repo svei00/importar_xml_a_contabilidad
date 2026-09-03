@@ -21,13 +21,15 @@ RESULTADO_POR_MOTIVO = {
 }
 
 
-def _resultado_de_la_fila(fila):
+def _resultado_de_la_fila(fila, uuids_bloqueados=frozenset()):
     if not fila.get("omitir"):
-        return "contabilizado"
+        # Una poliza bloqueada NO se importo a CONTPAQi: no cuenta como contabilizada.
+        bloqueado = str(fila.get("uuid", "")).strip().upper() in uuids_bloqueados
+        return "bloqueado" if bloqueado else "contabilizado"
     return RESULTADO_POR_MOTIVO.get(fila.get("motivo_omision"), "omitido")
 
 
-def _documento_desde_fila(fila, es_egresos):
+def _documento_desde_fila(fila, es_egresos, uuids_bloqueados=frozenset()):
     """Una fila de CFDI -> diccionario con las columnas de documentos_contabilizados."""
     fecha = str(fila.get("fecha", ""))[:10]
     return {
@@ -46,23 +48,24 @@ def _documento_desde_fila(fila, es_egresos):
         "cuenta_principal": fila.get("cuenta", ""),
         "cuenta_contrapartida": fila.get("cuenta_contrapartida") or None,
         "cuenta_tercero": fila.get("cuenta_tercero") or None,
-        "resultado": _resultado_de_la_fila(fila),
+        "resultado": _resultado_de_la_fila(fila, uuids_bloqueados),
         "documento_original_uuid": fila.get("documento_original_uuid") or None,
     }
 
 
 def registrar_lote(empresa_rfc, tipo_operacion, periodo, carpeta_origen, filas,
-                   estado, archivo_txt=""):
+                   estado, archivo_txt="", uuids_bloqueados=()):
     """
     Crea el lote, guarda todos sus documentos (incluidos los omitidos, con su
     motivo) y los pagos aplicados de los REP. Devuelve el lote_id.
     """
     es_egresos = tipo_operacion == "egresos"
+    bloqueados = {str(u).strip().upper() for u in uuids_bloqueados}
     registro.crear_tablas(empresa_rfc)
     lote_id = registro.crear_lote(empresa_rfc, tipo_operacion, periodo, carpeta_origen,
                                   estado, archivo_txt)
     registro.guardar_documentos(
-        empresa_rfc, lote_id, [_documento_desde_fila(f, es_egresos) for f in filas])
+        empresa_rfc, lote_id, [_documento_desde_fila(f, es_egresos, bloqueados) for f in filas])
 
     for fila in filas:
         if fila.get("tipo") == "P" and not fila.get("omitir") and fila.get("aplicaciones_pago"):
